@@ -14,25 +14,52 @@ class FeatureEngineer:
     
     @staticmethod
     def validate_data(df: pd.DataFrame) -> pd.DataFrame:
-        """Валидация входных данных"""
+        """Валидация входных данных (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
         required_columns = ['open', 'high', 'low', 'close']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
             raise ValueError(f"Отсутствуют обязательные колонки: {missing_columns}")
         
-        # Проверка на валидные значения
+        df = df.copy()
+        
+        # ИСПРАВЛЕНИЕ: Конвертируем числовые колонки перед проверкой на NaN
+        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_columns:
+            if col in df.columns:
+                try:
+                    # Конвертируем в строку и заменяем запятые на точки
+                    if df[col].dtype == 'object':
+                        df[col] = df[col].astype(str).str.replace(',', '.', regex=False).str.strip()
+                    
+                    # Конвертируем в числовой тип
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+                except Exception as e:
+                    logger.warning(f"Ошибка конвертации колонки {col}: {e}")
+        
+        # Проверка на валидные значения ПОСЛЕ конвертации
         for col in required_columns:
             if df[col].isna().any():
                 logger.warning(f"Найдены NaN в колонке {col}, заполняем методом forward fill")
-                df[col] = df[col].ffill()  # Исправлено для новых версий pandas
+                df[col] = df[col].ffill()
         
         # Если volume отсутствует, создаем заглушку
         if 'volume' not in df.columns:
             logger.info("Volume отсутствует, создаем синтетический объем")
             df['volume'] = np.random.randint(1000000, 10000000, len(df))
+        elif df['volume'].isna().any():
+            # Конвертируем volume аналогично
+            try:
+                if df['volume'].dtype == 'object':
+                    df['volume'] = df['volume'].astype(str).str.replace(',', '.', regex=False).str.strip()
+                df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+                df['volume'] = df['volume'].ffill()
+            except Exception as e:
+                logger.warning(f"Ошибка обработки volume: {e}")
+                df['volume'] = np.random.randint(1000000, 10000000, len(df))
             
-        return df.copy()
+        return df
     
     @staticmethod
     def create_rsi_features(df: pd.DataFrame, periods: List[int] = [14]) -> pd.DataFrame:
@@ -168,7 +195,7 @@ class FeatureEngineer:
     def create_all_features(cls, df: pd.DataFrame) -> pd.DataFrame:
         """Создание всех признаков"""
         try:
-            # Валидация
+            # Валидация (ТЕПЕРЬ ВКЛЮЧАЕТ КОНВЕРТАЦИЮ)
             df = cls.validate_data(df)
             
             # Проверяем минимальное количество данных

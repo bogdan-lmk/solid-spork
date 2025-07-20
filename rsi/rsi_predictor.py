@@ -1,5 +1,5 @@
 """
-Основной класс RSI предиктора
+Основной класс RSI предиктора (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 """
 import pandas as pd
 import numpy as np
@@ -54,46 +54,97 @@ class RSIPredictor:
             raise ValueError(f"Неподдерживаемый тип модели: {self.config.model_type}")
     
     def _prepare_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        """Подготовка признаков"""
-        # Исключаем целевую переменную и базовые данные
+        """Подготовка признаков (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
+        # Исключаем только целевую переменную и временные колонки
         exclude_columns = {
-            'open', 'high', 'low', 'close', 'volume', 'rsi_next', 'rsi', 'open_time'
+            'rsi_next', 'open_time', 'close_time'
         }
         
-        feature_columns = [col for col in df.columns if col not in exclude_columns and not col.startswith('Unnamed')]
+        # ИСПРАВЛЕНИЕ: Включаем все существующие индикаторы из данных
+        all_columns = set(df.columns) - exclude_columns
+        
+        # Удаляем колонки с Unnamed (если есть)
+        feature_columns = [col for col in all_columns if not col.startswith('Unnamed')]
         
         if not feature_columns:
             raise ValueError("Не найдено ни одного признака для обучения")
         
-        # Удаляем строки с NaN в важных колонках
-        important_columns = ['rsi_next'] + feature_columns[:10]  # Берем первые 10 признаков как важные
-        available_important = [col for col in important_columns if col in df.columns]
-        
-        df_clean = df.dropna(subset=available_important)
-        
-        if len(df_clean) == 0:
-            raise ValueError("После удаления NaN не осталось данных для обучения")
+        logger.info(f"Доступные колонки для признаков: {len(feature_columns)}")
+        logger.debug(f"Колонки: {feature_columns[:10]}...")  # Показываем первые 10
         
         # Проверяем наличие целевой переменной
-        if 'rsi_next' not in df_clean.columns:
+        if 'rsi_next' not in df.columns:
             raise ValueError("Отсутствует целевая переменная 'rsi_next'")
         
-        X = df_clean[feature_columns]
-        y = df_clean['rsi_next']
+        # Получаем данные
+        X = df[feature_columns].copy()
+        y = df['rsi_next'].copy()
+        
+        # Конвертируем все в числовой формат
+        for col in X.columns:
+            if X[col].dtype == 'object':
+                try:
+                    # Заменяем запятые на точки и конвертируем
+                    X[col] = X[col].astype(str).str.replace(',', '.', regex=False).str.strip()
+                    X[col] = pd.to_numeric(X[col], errors='coerce')
+                except Exception as e:
+                    logger.warning(f"Не удалось конвертировать колонку {col}: {e}")
+        
+        # Определяем числовые колонки
+        numeric_columns = X.select_dtypes(include=[np.number]).columns.tolist()
+        logger.info(f"Числовые колонки: {len(numeric_columns)}")
+        
+        if not numeric_columns:
+            raise ValueError("Не найдено числовых признаков")
+        
+        # Используем только числовые колонки
+        X = X[numeric_columns]
+        
+        # Удаляем строки с NaN в важных колонках
+        # Сначала проверяем целевую переменную
+        valid_target_mask = ~y.isna()
+        
+        # Затем проверяем основные OHLC колонки (если есть)
+        ohlc_columns = ['open', 'high', 'low', 'close']
+        available_ohlc = [col for col in ohlc_columns if col in X.columns]
+        
+        if available_ohlc:
+            valid_ohlc_mask = ~X[available_ohlc].isna().any(axis=1)
+            valid_mask = valid_target_mask & valid_ohlc_mask
+        else:
+            # Если нет OHLC, проверяем первые 5 числовых колонок
+            important_cols = numeric_columns[:5]
+            valid_features_mask = ~X[important_cols].isna().any(axis=1)
+            valid_mask = valid_target_mask & valid_features_mask
+        
+        # Применяем маску
+        X_clean = X[valid_mask]
+        y_clean = y[valid_mask]
+        
+        logger.info(f"После очистки: строк {len(X_clean)} из {len(X)}")
+        
+        if len(X_clean) == 0:
+            raise ValueError("После удаления NaN не осталось данных для обучения")
         
         # Удаляем признаки с нулевой дисперсией
-        variance = X.var()
+        variance = X_clean.var()
         non_zero_variance_features = variance[variance > 1e-8].index.tolist()
         
         if len(non_zero_variance_features) == 0:
             raise ValueError("Все признаки имеют нулевую дисперсию")
         
-        X = X[non_zero_variance_features]
-        self.feature_names = non_zero_variance_features
+        # Ограничиваем количество признаков для стабильности
+        max_features = min(len(non_zero_variance_features), 50)
         
-        logger.info(f"Отобрано {len(self.feature_names)} признаков из {len(feature_columns)}")
+        # Сортируем по дисперсии и берем топ признаков
+        top_features = variance[non_zero_variance_features].sort_values(ascending=False).head(max_features).index.tolist()
         
-        return X, y
+        X_final = X_clean[top_features]
+        self.feature_names = top_features
+        
+        logger.info(f"Отобрано {len(self.feature_names)} признаков из {len(numeric_columns)}")
+        
+        return X_final, y_clean
     
     def train(self, df: pd.DataFrame, save_path: Optional[str] = None) -> Dict[str, float]:
         """
@@ -111,7 +162,22 @@ class RSIPredictor:
         try:
             # Создание признаков
             df_features = FeatureEngineer.create_all_features(df)
-            logger.info(f"Создано признаков: {len([col for col in df_features.columns if col not in ['open', 'high', 'low', 'close', 'volume']])}")
+            
+            # ИСПРАВЛЕНИЕ: Отладочная информация о типах данных
+            logger.info(f"Типы колонок после создания признаков:")
+            numeric_cols = df_features.select_dtypes(include=[np.number]).columns
+            datetime_cols = df_features.select_dtypes(include=['datetime64']).columns
+            object_cols = df_features.select_dtypes(include=['object']).columns
+            
+            logger.info(f"Числовые колонки: {len(numeric_cols)}")
+            logger.info(f"Временные колонки: {len(datetime_cols)}")
+            logger.info(f"Object колонки: {len(object_cols)}")
+            
+            if len(object_cols) > 0:
+                logger.warning(f"Найдены object колонки: {list(object_cols)[:5]}")
+            
+            total_features = len([col for col in df_features.columns if col not in ['open', 'high', 'low', 'close', 'volume']])
+            logger.info(f"Создано признаков: {total_features}")
             
             # Подготовка данных
             X, y = self._prepare_features(df_features)
@@ -208,7 +274,7 @@ class RSIPredictor:
     
     def predict(self, df: pd.DataFrame, return_confidence: bool = False) -> Union[float, PredictionResult]:
         """
-        Предсказание RSI для следующего периода
+        Предсказание RSI для следующего периода (ИСПРАВЛЕННАЯ ВЕРСИЯ)
         
         Args:
             df: DataFrame с данными
@@ -224,30 +290,79 @@ class RSIPredictor:
             # Создание признаков
             df_features = FeatureEngineer.create_all_features(df)
             
-            # Подготовка данных
-            X, _ = self._prepare_features(df_features)
+            # ИСПРАВЛЕНИЕ: Используем тот же процесс подготовки, что и при обучении
+            # Исключаем только целевую переменную и временные колонки
+            exclude_columns = {
+                'rsi_next', 'open_time', 'close_time'
+            }
             
-            if len(X) == 0:
+            # Получаем все доступные колонки
+            all_columns = set(df_features.columns) - exclude_columns
+            feature_columns = [col for col in all_columns if not col.startswith('Unnamed')]
+            
+            if not feature_columns:
                 raise ValueError("Недостаточно данных для предсказания")
             
-            # Берем последнюю доступную строку
-            X_last = X.iloc[[-1]]
+            # Получаем данные
+            X = df_features[feature_columns].copy()
             
-            # Проверяем соответствие признаков
-            missing_features = set(self.feature_names) - set(X_last.columns)
-            if missing_features:
-                logger.warning(f"Отсутствуют признаки: {missing_features}")
-                # Добавляем отсутствующие признаки со значением 0
-                for feature in missing_features:
-                    X_last[feature] = 0
+            # Конвертируем все в числовой формат
+            for col in X.columns:
+                if X[col].dtype == 'object':
+                    try:
+                        X[col] = X[col].astype(str).str.replace(',', '.', regex=False).str.strip()
+                        X[col] = pd.to_numeric(X[col], errors='coerce')
+                    except Exception as e:
+                        logger.warning(f"Не удалось конвертировать колонку {col}: {e}")
             
-            # Упорядочиваем колонки согласно обученной модели
-            X_last = X_last[self.feature_names]
+            # Используем только числовые колонки
+            numeric_columns = X.select_dtypes(include=[np.number]).columns.tolist()
+            X_numeric = X[numeric_columns]
             
-            X_last_scaled = self.scaler.transform(X_last)
+            # Берем последнюю доступную строку без NaN
+            # Сначала проверяем основные OHLC колонки (если есть)
+            ohlc_columns = ['open', 'high', 'low', 'close']
+            available_ohlc = [col for col in ohlc_columns if col in X_numeric.columns]
+            
+            if available_ohlc:
+                valid_mask = ~X_numeric[available_ohlc].isna().any(axis=1)
+            else:
+                # Если нет OHLC, проверяем первые 5 числовых колонок
+                important_cols = numeric_columns[:5]
+                valid_mask = ~X_numeric[important_cols].isna().any(axis=1)
+            
+            valid_rows = X_numeric[valid_mask]
+            
+            if len(valid_rows) == 0:
+                raise ValueError("Нет валидных строк для предсказания")
+            
+            # Берем последнюю валидную строку
+            X_last = valid_rows.iloc[[-1]]
+            
+            # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Подгоняем признаки под обученную модель
+            # Создаем DataFrame с нужными признаками в правильном порядке
+            X_aligned = pd.DataFrame(index=X_last.index, columns=self.feature_names)
+            
+            # Заполняем доступными признаками
+            for feature in self.feature_names:
+                if feature in X_last.columns:
+                    X_aligned[feature] = X_last[feature]
+                else:
+                    # Если признака нет, заполняем медианным значением или 0
+                    X_aligned[feature] = 0
+                    logger.debug(f"Признак {feature} отсутствует, заполнен нулем")
+            
+            # Конвертируем в числовой формат
+            X_aligned = X_aligned.astype(float)
+            
+            # Проверяем на NaN и заполняем
+            X_aligned = X_aligned.fillna(0)
+            
+            # Масштабирование
+            X_scaled = self.scaler.transform(X_aligned)
             
             # Предсказание
-            prediction = self.model.predict(X_last_scaled)[0]
+            prediction = self.model.predict(X_scaled)[0]
             prediction = np.clip(prediction, 0, 100)  # Ограничиваем RSI
             
             if not return_confidence:
@@ -257,7 +372,7 @@ class RSIPredictor:
             current_rsi = df_features['rsi'].iloc[-1] if 'rsi' in df_features.columns else 50.0
             change = prediction - current_rsi
             
-            # Простая оценка уверенности (можно улучшить)
+            # Простая оценка уверенности
             confidence = min(95.0, max(50.0, 100 - abs(change) * 5))
             
             return PredictionResult(
@@ -271,6 +386,7 @@ class RSIPredictor:
         except Exception as e:
             logger.error(f"Ошибка при предсказании: {e}")
             raise
+    
     
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         """Получение важности признаков"""

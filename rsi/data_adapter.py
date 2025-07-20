@@ -72,13 +72,15 @@ class DataAdapter:
             'rsi_volatility', 'adx', 'rsi_divergence', 'rsi_delta', 'linear_regression'
         ]
         
-        # ИСПРАВЛЕНИЕ: Конвертируем только числовые колонки, исключая временные
+        # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Конвертируем только числовые колонки, исключая временные
         for col in numeric_columns:
             if col in df.columns and col not in time_columns:  # Исключаем временные колонки!
                 try:
-                    # Заменяем запятые на точки (если есть)
-                    if df[col].dtype == 'object':
-                        df[col] = df[col].astype(str).str.replace(',', '.')
+                    # Конвертируем в строку и заменяем запятые на точки
+                    df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+                    
+                    # Убираем пробелы и другие символы
+                    df[col] = df[col].str.strip()
                     
                     # Конвертируем в числовой тип
                     df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -193,3 +195,158 @@ class DataAdapter:
                 unique_types = set(type(x).__name__ for x in df[col].dropna().head(10))
                 if len(unique_types) > 1:
                     logger.warning(f"⚠️ Смешанные типы в {col}: {unique_types}")
+
+def validate_ohlcv_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Валидация OHLCV данных"""
+    required_columns = ['open', 'high', 'low', 'close']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        raise ValueError(f"Отсутствуют обязательные колонки: {missing_columns}")
+    
+    # Проверка логических соотношений OHLC
+    df_clean = df.copy()
+    
+    # High должен быть >= max(open, close)
+    invalid_high = df_clean['high'] < df_clean[['open', 'close']].max(axis=1)
+    if invalid_high.any():
+        logger.warning(f"Найдено {invalid_high.sum()} строк с некорректным high")
+        df_clean.loc[invalid_high, 'high'] = df_clean.loc[invalid_high, ['open', 'close']].max(axis=1)
+    
+    # Low должен быть <= min(open, close)
+    invalid_low = df_clean['low'] > df_clean[['open', 'close']].min(axis=1)
+    if invalid_low.any():
+        logger.warning(f"Найдено {invalid_low.sum()} строк с некорректным low")
+        df_clean.loc[invalid_low, 'low'] = df_clean.loc[invalid_low, ['open', 'close']].min(axis=1)
+    
+    # Удаление строк с отрицательными ценами
+    negative_prices = (df_clean[['open', 'high', 'low', 'close']] <= 0).any(axis=1)
+    if negative_prices.any():
+        logger.warning(f"Удалено {negative_prices.sum()} строк с отрицательными ценами")
+        df_clean = df_clean[~negative_prices]
+    
+    return df_clean
+
+def convert_numeric_columns(df: pd.DataFrame, columns: list = None) -> pd.DataFrame:
+    """Конвертация колонок в числовой формат с обработкой различных форматов"""
+    df_result = df.copy()
+    
+    if columns is None:
+        # Определяем потенциально числовые колонки
+        columns = [col for col in df.columns if col not in ['open_time', 'close_time']]
+    
+    for col in columns:
+        if col in df_result.columns:
+            try:
+                # Если уже числовая, пропускаем
+                if pd.api.types.is_numeric_dtype(df_result[col]):
+                    continue
+                
+                # Конвертируем в строку и очищаем
+                series = df_result[col].astype(str)
+                
+                # Заменяем запятые на точки (европейский формат)
+                series = series.str.replace(',', '.', regex=False)
+                
+                # Удаляем пробелы
+                series = series.str.strip()
+                
+                # Удаляем символы валют и процентов
+                series = series.str.replace(r'[€$%]', '', regex=True)
+                
+                # Обрабатываем 'nan', 'null', пустые строки
+                series = series.replace(['nan', 'null', 'NaN', 'NULL', ''], np.nan)
+                
+                # Конвертируем в числовой формат
+                df_result[col] = pd.to_numeric(series, errors='coerce')
+                
+                logger.debug(f"Колонка {col} успешно конвертирована в числовой формат")
+                
+            except Exception as e:
+                logger.warning(f"Не удалось конвертировать колонку {col}: {e}")
+    
+    return df_result
+
+def detect_decimal_separator(df: pd.DataFrame, sample_columns: list = None) -> str:
+    """Определение десятичного разделителя в данных"""
+    if sample_columns is None:
+        sample_columns = ['open', 'high', 'low', 'close', 'volume']
+    
+    comma_count = 0
+    dot_count = 0
+    
+    for col in sample_columns:
+        if col in df.columns:
+            # Берем первые 100 не-null значений
+            sample_data = df[col].dropna().head(100).astype(str)
+            
+            for value in sample_data:
+                if ',' in value and '.' in value:
+                    # Если есть и запятая и точка, вероятно запятая - тысячи, точка - десятичная
+                    dot_count += 1
+                elif ',' in value:
+                    comma_count += 1
+                elif '.' in value:
+                    dot_count += 1
+    
+    if comma_count > dot_count:
+        logger.info("Обнаружен европейский формат чисел (запятая как десятичный разделитель)")
+        return ','
+    else:
+        logger.info("Обнаружен американский формат чисел (точка как десятичный разделитель)")
+        return '.'
+
+def clean_data_auto(df: pd.DataFrame) -> pd.DataFrame:
+    """Автоматическая очистка данных с определением формата"""
+    logger.info("Начинаем автоматическую очистку данных")
+    
+    df_clean = df.copy()
+    
+    # Определяем десятичный разделитель
+    decimal_sep = detect_decimal_separator(df_clean)
+    
+    # Конвертируем числовые колонки
+    if decimal_sep == ',':
+        # Европейский формат - заменяем запятые на точки
+        df_clean = convert_numeric_columns(df_clean)
+    else:
+        # Американский формат - конвертируем как есть
+        df_clean = convert_numeric_columns(df_clean)
+    
+    # Обрабатываем временные колонки
+    time_columns = ['open_time', 'close_time', 'timestamp', 'date', 'time']
+    for col in time_columns:
+        if col in df_clean.columns:
+            try:
+                df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+                logger.info(f"Временная колонка {col} обработана")
+            except Exception as e:
+                logger.warning(f"Не удалось обработать временную колонку {col}: {e}")
+    
+    # Валидация OHLCV если это торговые данные
+    if all(col in df_clean.columns for col in ['open', 'high', 'low', 'close']):
+        try:
+            df_clean = validate_ohlcv_data(df_clean)
+            logger.info("OHLCV данные валидированы")
+        except Exception as e:
+            logger.warning(f"Ошибка валидации OHLCV: {e}")
+    
+    # Финальная очистка
+    initial_rows = len(df_clean)
+    
+    # Удаляем полностью пустые строки
+    df_clean = df_clean.dropna(how='all')
+    
+    # Заполняем NaN в числовых колонках
+    numeric_cols = df_clean.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        df_clean[numeric_cols] = df_clean[numeric_cols].ffill().bfill()
+    
+    final_rows = len(df_clean)
+    
+    if initial_rows != final_rows:
+        logger.info(f"Удалено {initial_rows - final_rows} строк в процессе очистки")
+    
+    logger.info(f"Автоматическая очистка завершена. Итоговый размер: {df_clean.shape}")
+    
+    return df_clean
