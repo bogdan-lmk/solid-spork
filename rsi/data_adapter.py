@@ -35,7 +35,7 @@ class DataAdapter:
                     if len(df.columns) > 1:  # Успешное разделение
                         logger.info(f"CSV загружен с разделителем '{sep}', колонок: {len(df.columns)}")
                         return df
-                except:
+                except Exception:
                     continue
             
             # Если ничего не сработало, используем запятую по умолчанию
@@ -80,7 +80,7 @@ class DataAdapter:
             try:
                 df['open_time'] = pd.to_datetime(df['open_time'])
                 df = df.sort_values('open_time').reset_index(drop=True)
-            except:
+            except Exception:
                 logger.warning("Не удалось обработать временные метки")
         
         # Удаление строк с критичными NaN (в OHLC)
@@ -92,8 +92,8 @@ class DataAdapter:
         if before_rows != after_rows:
             logger.info(f"Удалено {before_rows - after_rows} строк с NaN в OHLC данных")
         
-        # Заполнение остальных NaN
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        # Заполнение остальных NaN (исправлено для новых версий pandas)
+        df = df.ffill().bfill()
         
         return df
     
