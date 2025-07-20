@@ -190,21 +190,133 @@ class FeatureEngineer:
             logger.warning(f"Ошибка при создании трендовых индикаторов: {e}")
         
         return result
+        
+    @staticmethod
+    def create_rsi_correlated_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Создание признаков, коррелирующих с RSI"""
+        result = df.copy()
+        
+        if len(df) < 14:
+            logger.warning("Недостаточно данных для RSI-коррелирующих индикаторов")
+            return result
+        
+        try:
+            # 1. Стохастический осциллятор (высокая корреляция с RSI)
+            result['stoch_k'], result['stoch_d'] = talib.STOCH(
+                df['high'].astype(float), df['low'].astype(float), df['close'].astype(float), 
+                fastk_period=14, slowk_period=3, slowd_period=3
+            )
+            result['stoch_divergence'] = result['stoch_k'] - result['stoch_d']
+            result['stoch_momentum'] = result['stoch_k'].diff()
+            
+            # 2. Williams %R (перевернутый стохастик)
+            result['williams_r'] = talib.WILLR(
+                df['high'].astype(float), df['low'].astype(float), df['close'].astype(float), 
+                timeperiod=14
+            )
+            # Нормализуем Williams %R к шкале 0-100 как RSI
+            result['williams_r_normalized'] = (result['williams_r'] + 100)
+            
+            # 3. CCI (Commodity Channel Index) - улучшенная версия
+            result['cci'] = talib.CCI(
+                df['high'].astype(float), df['low'].astype(float), df['close'].astype(float), 
+                timeperiod=14
+            )
+            # Нормализуем CCI к шкале RSI (0-100)
+            result['cci_normalized'] = np.clip((result['cci'] + 200) / 4, 0, 100)
+            
+            # 4. MACD с акцентом на корреляцию с RSI
+            macd, macd_signal, macd_hist = talib.MACD(
+                df['close'].astype(float), fastperiod=12, slowperiod=26, signalperiod=9
+            )
+            result['macd'] = macd
+            result['macd_signal'] = macd_signal
+            result['macd_hist'] = macd_hist
+            
+            # Создаем MACD-производные, коррелирующие с RSI
+            result['macd_momentum'] = macd.diff()
+            result['macd_oscillator'] = np.where(
+                df['close'].astype(float) != 0,
+                (macd / df['close'].astype(float)) * 1000,  # Нормализация
+                0
+            )
+            
+            # 5. Bollinger Bands %B (позиция между полосами)
+            bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'].astype(float), timeperiod=20)
+            bb_range = bb_upper - bb_lower
+            result['bb_percent_b'] = np.where(
+                bb_range != 0,
+                (df['close'].astype(float) - bb_lower) / bb_range,
+                0.5
+            )
+            # Конвертируем в шкалу 0-100 как RSI
+            result['bb_percent_b_scaled'] = result['bb_percent_b'] * 100
+            result['bb_width'] = np.where(
+                bb_middle != 0,
+                bb_range / bb_middle,
+                0
+            )
+            
+            # 6. Дополнительные RSI-коррелирующие признаки
+            
+            # Momentum (сильно коррелирует с RSI)
+            result['momentum'] = talib.MOM(df['close'].astype(float), timeperiod=14)
+            result['momentum_normalized'] = (result['momentum'] / df['close'].astype(float)) * 100
+            
+            # ROC (Rate of Change) - также коррелирует с RSI
+            result['roc'] = talib.ROC(df['close'].astype(float), timeperiod=14)
+            
+            # MFI (Money Flow Index) - "RSI с объемом"
+            result['mfi'] = talib.MFI(
+                df['high'].astype(float), df['low'].astype(float), 
+                df['close'].astype(float), df['volume'].astype(float), 
+                timeperiod=14
+            )
+            
+            # 7. Комбинированные RSI-подобные индикаторы
+            
+            # Среднее значение всех осцилляторов (сильный предиктор RSI)
+            oscillators = ['stoch_k', 'williams_r_normalized', 'cci_normalized', 'bb_percent_b_scaled']
+            available_oscillators = [col for col in oscillators if col in result.columns and not result[col].isna().all()]
+            
+            if available_oscillators:
+                result['oscillators_mean'] = result[available_oscillators].mean(axis=1)
+                result['oscillators_std'] = result[available_oscillators].std(axis=1)
+            
+            # Дивергенция между ценой и осцилляторами
+            price_change = df['close'].astype(float).pct_change(5)  # 5-периодное изменение цены
+            if 'stoch_k' in result.columns:
+                stoch_change = result['stoch_k'].diff(5)
+                result['price_stoch_divergence'] = price_change - (stoch_change / 100)
+            
+            logger.info("Созданы RSI-коррелирующие признаки")
+            
+        except Exception as e:
+            logger.warning(f"Ошибка при создании RSI-коррелирующих признаков: {e}")
+        
+        return result
     
     @classmethod
     def create_all_features(cls, df: pd.DataFrame) -> pd.DataFrame:
-        """Создание всех признаков"""
+        """Создание всех признаков с акцентом на RSI-коррелирующие индикаторы"""
         try:
-            # Валидация (ТЕПЕРЬ ВКЛЮЧАЕТ КОНВЕРТАЦИЮ)
+            # Валидация (ВКЛЮЧАЕТ КОНВЕРТАЦИЮ)
             df = cls.validate_data(df)
             
             # Проверяем минимальное количество данных
             if len(df) < 50:
                 logger.warning(f"Мало данных для качественного анализа: {len(df)} строк. Рекомендуется минимум 50.")
             
-            # Создание признаков
+            # 1. Создание базовых RSI признаков
             df = cls.create_rsi_features(df)
+            
+            # 2. НОВОЕ: Создание RSI-коррелирующих признаков (приоритет)
+            df = cls.create_rsi_correlated_features(df)
+            
+            # 3. Дополнительные осцилляторы (если еще не созданы)
             df = cls.create_oscillator_features(df)
+            
+            # 4. Трендовые индикаторы
             df = cls.create_trend_features(df)
             
             # Целевая переменная
@@ -217,7 +329,12 @@ class FeatureEngineer:
             # Удаляем строки с бесконечными значениями
             df = df.replace([np.inf, -np.inf], np.nan)
             
+            # Подсчитываем RSI-коррелирующие признаки для статистики
+            rsi_correlated_features = [col for col in df.columns if any(keyword in col.lower() for keyword in 
+                                     ['stoch', 'williams', 'cci', 'macd', 'bb_percent', 'mfi', 'oscillators', 'momentum', 'roc'])]
+            
             logger.info(f"Создано признаков: {len(df.columns)}")
+            logger.info(f"RSI-коррелирующих признаков: {len(rsi_correlated_features)}")
             
             return df
             
