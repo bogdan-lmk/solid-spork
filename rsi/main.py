@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 # Добавляем текущую директорию в Python path (absolute path)
-sys.path.insert(0, os.path.abspath(str(Path(__file__).parent)))
+current_dir = Path(__file__).parent.absolute()
+sys.path.insert(0, str(current_dir))
 
 import logging
 import warnings
@@ -18,7 +19,6 @@ warnings.filterwarnings('ignore')
 
 def main():
     """Основная функция"""
-    current_dir = Path(__file__).parent
     
     print("🚀 RSI Predictor - Система предсказания RSI")
     print("=" * 60)
@@ -27,17 +27,55 @@ def main():
         # Импорты внутри функции для избежания циркулярных импортов
         from config import ModelConfig
         from rsi_predictor import RSIPredictor
-        from utilities import (
-            analyze_your_csv, 
-            train_on_accumulated_data, 
-            integrate_with_existing_data,
-            create_test_data
-        )
         from data_adapter import DataAdapter
+        
+        # Попробуем импортировать utilities с разными именами
+        try:
+            from utilities import (
+                analyze_your_csv, 
+                train_on_accumulated_data, 
+                integrate_with_existing_data,
+                create_test_data
+            )
+        except ImportError:
+            # Если utilities с пробелом в конце
+            import importlib.util
+            utilities_path = current_dir / "utilities.py "
+            if utilities_path.exists():
+                spec = importlib.util.spec_from_file_location("utilities", utilities_path)
+                utilities_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(utilities_module)
+                
+                analyze_your_csv = utilities_module.analyze_your_csv
+                train_on_accumulated_data = utilities_module.train_on_accumulated_data
+                integrate_with_existing_data = utilities_module.integrate_with_existing_data
+                create_test_data = utilities_module.create_test_data
+            else:
+                raise ImportError("Не удалось найти модуль utilities")
+        
     except ImportError as e:
         print(f"❌ Ошибка импорта: {e}")
         print(f"💡 Убедитесь, что все файлы находятся в папке: {current_dir}")
         print(f"📁 Текущая директория: {os.getcwd()}")
+        
+        # Проверим наличие всех файлов
+        required_files = [
+            "config.py",
+            "rsi_predictor.py", 
+            "data_adapter.py",
+            "utilities.py",
+            "utilities.py ",  # с пробелом
+            "feature_engineer.py",
+            "model_evaluator.py",
+            "data_types.py"
+        ]
+        
+        print("\n📋 Проверка файлов:")
+        for file in required_files:
+            file_path = current_dir / file
+            exists = "✅" if file_path.exists() else "❌"
+            print(f"{exists} {file}")
+        
         return
     
     # 1. АНАЛИЗ ВАШИХ ДАННЫХ
@@ -131,7 +169,6 @@ def main():
             # Создание тестовых данных как fallback
             df = create_test_data(500)
             
-            from config import ModelConfig
             config = ModelConfig(model_type='catboost', test_size=0.2, cv_folds=3)
             predictor = RSIPredictor(config)
             
