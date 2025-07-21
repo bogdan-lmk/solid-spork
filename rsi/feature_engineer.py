@@ -231,17 +231,21 @@ class FeatureEngineer:
                 macd, macd_signal, macd_hist = talib.MACD(
                     close_prices, fastperiod=12, slowperiod=26, signalperiod=9
                 )
-                
+                macd = pd.Series(macd, index=df.index)
+                macd_signal = pd.Series(macd_signal, index=df.index)
+                macd_hist = pd.Series(macd_hist, index=df.index)
+
                 result['macd'] = macd.shift(1)  # ИСПРАВЛЕНИЕ: лаг!
                 result['macd_signal'] = macd_signal.shift(1)
                 result['macd_hist'] = macd_hist.shift(1)
                 
                 # Нормализация MACD (с лагом!)
-                result['macd_normalized'] = np.where(
-                    close_prices != 0, 
-                    macd / close_prices * 100, 
+                macd_norm = np.where(
+                    close_prices != 0,
+                    macd / close_prices * 100,
                     0
-                ).shift(1)
+                )
+                result['macd_normalized'] = pd.Series(macd_norm, index=df.index).shift(1)
                 
                 # MACD momentum (с лагом!)
                 result['macd_momentum'] = macd.diff().shift(1)
@@ -253,21 +257,28 @@ class FeatureEngineer:
             # Bollinger Bands (с лагом!)
             try:
                 bb_upper, bb_middle, bb_lower = talib.BBANDS(close_prices, timeperiod=20)
-                
+
+                bb_upper = pd.Series(bb_upper, index=df.index)
+                bb_middle = pd.Series(bb_middle, index=df.index)
+                bb_lower = pd.Series(bb_lower, index=df.index)
+
                 bb_range = bb_upper - bb_lower
                 bb_percent_b = np.where(
                     bb_range != 0,
                     (close_prices - bb_lower) / bb_range,
                     0.5
                 )
-                
+                bb_percent_b = pd.Series(bb_percent_b, index=df.index)
+
                 result['bb_percent_b'] = bb_percent_b.shift(1)  # ИСПРАВЛЕНИЕ: лаг!
                 result['bb_percent_b_scaled'] = (bb_percent_b * 100).shift(1)
-                result['bb_width'] = np.where(
+
+                bb_width = np.where(
                     bb_middle != 0,
                     bb_range / bb_middle,
                     0
-                ).shift(1)
+                )
+                result['bb_width'] = pd.Series(bb_width, index=df.index).shift(1)
                 
                 logger.info("Bollinger Bands созданы успешно")
             except Exception as e:
@@ -276,6 +287,7 @@ class FeatureEngineer:
             # ADX (с лагом!)
             try:
                 adx = talib.ADX(high_prices, low_prices, close_prices, timeperiod=14)
+                adx = pd.Series(adx, index=df.index)
                 result['adx_calc'] = adx.shift(1)  # ИСПРАВЛЕНИЕ: лаг! (переименовали чтобы не конфликтовать)
                 logger.info("ADX создан успешно")
             except Exception as e:
@@ -293,11 +305,12 @@ class FeatureEngineer:
                 # Отношения EMA (с лагом!)
                 ema_9 = talib.EMA(close_prices, timeperiod=9)
                 ema_21 = talib.EMA(close_prices, timeperiod=21)
-                result['ema_ratio_9_21'] = np.where(
+                ema_ratio = np.where(
                     ema_21 != 0,
                     ema_9 / ema_21,
                     1
-                ).shift(1)
+                )
+                result['ema_ratio_9_21'] = pd.Series(ema_ratio, index=df.index).shift(1)
                 
                 logger.info("Дополнительные трендовые индикаторы созданы")
             except Exception as e:
@@ -338,6 +351,7 @@ class FeatureEngineer:
                     (result['atr'] / result['close']) * 100,
                     0
                 )
+                atr_percentage = pd.Series(atr_percentage, index=result.index)
                 result['atr_percentage'] = atr_percentage.shift(1)  # ИСПРАВЛЕНИЕ: лаг!
             
             # EMA производные (с лагом!)
@@ -347,6 +361,7 @@ class FeatureEngineer:
                     result['fast_ema'] / result['slow_ema'],
                     1
                 )
+                ema_ratio = pd.Series(ema_ratio, index=result.index)
                 result['ema_ratio'] = ema_ratio.shift(1)  # ИСПРАВЛЕНИЕ: лаг!
                 result['ema_spread'] = (result['fast_ema'] - result['slow_ema']).shift(1)
             

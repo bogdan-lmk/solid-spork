@@ -97,10 +97,10 @@ class DataAdapter:
                 converted = pd.to_numeric(cleaned, errors='coerce')
                 success_rate = 1 - converted.isna().sum() / len(series)
                 
-                if success_rate >= 0.8:
+                if success_rate >= 0.7:
                     logger.info(f"Конвертация {column_name}: {success_rate:.1%} (после очистки)")
                     return converted
-                elif success_rate >= 0.5:
+                elif success_rate >= 0.4:
                     logger.warning(f"Конвертация {column_name}: {success_rate:.1%} (частичная)")
                     return converted
                     
@@ -114,7 +114,7 @@ class DataAdapter:
                 converted = pd.to_numeric(extracted, errors='coerce')
                 success_rate = 1 - converted.isna().sum() / len(series)
                 
-                if success_rate >= 0.5:
+                if success_rate >= 0.4:
                     logger.warning(f"Агрессивная конвертация {column_name}: {success_rate:.1%}")
                     return converted
                     
@@ -132,8 +132,11 @@ class DataAdapter:
     def _convert_datetime_accumulated(series: pd.Series, column_name: str) -> pd.Series:
         """Специальная конвертация datetime для accumulatedData"""
         try:
-            # Попытка 1: Стандартная конвертация
-            converted = pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
+            # Предварительная очистка строковых значений
+            cleaned = series.astype(str).str.strip().str.replace('"', '', regex=False).str.replace("'", '', regex=False)
+
+            # Попытка 1: Стандартная конвертация с учетом dayfirst
+            converted = pd.to_datetime(cleaned, errors='coerce', infer_datetime_format=True, dayfirst=True)
             success_rate = 1 - converted.isna().sum() / len(series)
             
             if success_rate > 0.8:
@@ -141,7 +144,7 @@ class DataAdapter:
                 return converted
             
             # Попытка 2: Unix timestamp (если числа большие)
-            if series.dtype in ['int64', 'float64'] or all(str(x).isdigit() for x in series.dropna().head(10)):
+            if series.dtype in ['int64', 'float64'] or all(str(x).isdigit() for x in cleaned.dropna().head(10)):
                 try:
                     # Проверяем, похоже ли на Unix timestamp
                     test_values = pd.to_numeric(series.dropna().head(10), errors='coerce')
@@ -161,7 +164,9 @@ class DataAdapter:
                 '%d/%m/%Y %H:%M:%S',
                 '%d/%m/%Y',
                 '%m/%d/%Y %H:%M:%S',
-                '%m/%d/%Y'
+                '%m/%d/%Y',
+                '%d.%m.%Y %H:%M:%S',
+                '%d.%m.%Y'
             ]
             
             for fmt in formats_to_try:
@@ -176,7 +181,7 @@ class DataAdapter:
             
             # Если ничего не помогло, возвращаем исходное с предупреждением
             logger.warning(f"Низкий успех datetime конвертации {column_name}: {success_rate:.1%}")
-            return pd.to_datetime(series, errors='coerce')
+            return pd.to_datetime(cleaned, errors='coerce')
             
         except Exception as e:
             logger.error(f"Ошибка конвертации datetime {column_name}: {e}")
@@ -251,6 +256,21 @@ class DataAdapter:
                     except Exception as e:
                         logger.warning(f"Ошибка обработки сигнальной колонки {col}: {e}")
                         df[col] = pd.Categorical(df[col]).codes
+
+        # Восстановление критически важных индикаторов, если они полностью NaN
+        if 'volatility_percent' in df.columns and df['volatility_percent'].isna().all():
+            if 'close' in df.columns:
+                df['volatility_percent'] = df['close'].pct_change().abs() * 100
+                logger.info("volatility_percent восстановлен из close")
+
+        if 'linear_regression' in df.columns and df['linear_regression'].isna().all():
+            if 'close' in df.columns:
+                lr = (
+                    df['close'].rolling(window=14)
+                    .apply(lambda x: np.polyfit(range(len(x)), x, 1)[0] if x.notna().all() else np.nan)
+                )
+                df['linear_regression'] = lr
+                logger.info("linear_regression восстановлен скользящей регрессией")
         
         # 5. Сортировка по времени
         if 'open_time' in df.columns and not df['open_time'].isna().all():
@@ -308,12 +328,16 @@ class DataAdapter:
         if 'open_time' in df.columns:
             try:
                 initial_rows = len(df)
-                df = df.drop_duplicates(subset=['open_time'], keep='first')
-                removed_duplicates = initial_rows - len(df)
-                
-                if removed_duplicates > 0:
-                    logger.info(f"Удалено дубликатов по времени: {removed_duplicates}")
-                    
+                missing_times = df['open_time'].isna().sum()
+
+                if missing_times < len(df) * 0.5:
+                    df = df.drop_duplicates(subset=['open_time'], keep='first')
+                    removed_duplicates = initial_rows - len(df)
+                    if removed_duplicates > 0:
+                        logger.info(f"Удалено дубликатов по времени: {removed_duplicates}")
+                else:
+                    logger.warning("Пропущено удаление дубликатов: низкое качество временных данных")
+
             except Exception as e:
                 logger.warning(f"Ошибка удаления дубликатов: {e}")
         

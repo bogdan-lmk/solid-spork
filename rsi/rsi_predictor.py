@@ -263,11 +263,27 @@ class RSIPredictor:
                 model = self._get_model(model_type)
                 
                 if self.config.model_type == 'catboost':
-                    model.fit(
-                        X_train_scaled, y_train,
-                        eval_set=(X_test_scaled, y_test) if len(X_test) > 5 else None,
-                        use_best_model=True if len(X_test) > 5 else False
-                    )
+                    if model_type == 'classification':
+                        # For classification, create new params without eval_metric
+                        params = self.config.catboost_params.copy()
+                        if 'eval_metric' in params:
+                            del params['eval_metric']
+                        model = CatBoostClassifier(
+                            **params,
+                            loss_function='MultiClass',
+                            eval_metric='Accuracy'
+                        )
+                        model.fit(
+                            X_train_scaled, y_train,
+                            eval_set=(X_test_scaled, y_test) if len(X_test) > 5 else None,
+                            use_best_model=True if len(X_test) > 5 else False
+                        )
+                    else:
+                        model.fit(
+                            X_train_scaled, y_train,
+                            eval_set=(X_test_scaled, y_test) if len(X_test) > 5 else None,
+                            use_best_model=True if len(X_test) > 5 else False
+                        )
                 else:
                     model.fit(X_train_scaled, y_train)
                 
