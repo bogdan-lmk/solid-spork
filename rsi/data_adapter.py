@@ -1,5 +1,5 @@
 """
-Адаптер для работы с различными форматами CSV данных
+Адаптер для работы с различными форматами CSV данных (ИСПРАВЛЕННАЯ ВЕРСИЯ ПОД accumulatedData)
 """
 import pandas as pd
 import numpy as np
@@ -27,212 +27,218 @@ class DataAdapter:
     
     @staticmethod
     def load_csv(filepath: str, **kwargs) -> pd.DataFrame:
-        """Загрузка CSV с автоопределением разделителей и базовой валидацией"""
-        df = None
-
+        """Загрузка CSV с автоопределением разделителей"""
         for sep in [',', ';', '\t']:
             try:
-                tmp = pd.read_csv(filepath, sep=sep, **kwargs)
-                if len(tmp.columns) > 1:
-                    df = tmp
-                    logger.info(
-                        f"CSV загружен с разделителем '{sep}', колонок: {len(df.columns)}"
-                    )
-                    break
+                df = pd.read_csv(filepath, sep=sep, **kwargs)
+                if len(df.columns) > 1:
+                    logger.info(f"CSV загружен с разделителем '{sep}', колонок: {len(df.columns)}")
+                    return df
             except Exception:
                 continue
-
-        if df is None:
-            df = pd.read_csv(filepath, **kwargs)
-            logger.info(
-                f"CSV загружен с разделителем по умолчанию, колонок: {len(df.columns)}"
-            )
-
-        # Проверка NaN и типов данных
-        nan_count = int(df.isna().sum().sum())
-        if nan_count > 0:
-            logger.warning(f"В данных найдено NaN значений: {nan_count}")
-
-        object_cols = list(df.select_dtypes(include=['object']).columns)
-        if object_cols:
-            logger.warning(f"Колонки с типом object: {object_cols}")
-
+        
+        df = pd.read_csv(filepath, **kwargs)
+        logger.info(f"CSV загружен с разделителем по умолчанию, колонок: {len(df.columns)}")
         return df
     
     @staticmethod
-    def _identify_column_types(df: pd.DataFrame) -> Dict[str, List[str]]:
-        """Классификация колонок по типам"""
-        datetime_patterns = ['time', 'date', 'timestamp']
-        numeric_patterns = ['open', 'high', 'low', 'close', 'volume', 'price', 'rsi', 'atr', 
-                           'ema', 'sma', 'macd', 'bollinger', 'stoch', 'adx', 'cci', 'mfi']
+    def _robust_numeric_conversion_accumulated(series: pd.Series, column_name: str) -> pd.Series:
+        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Специализированная конвертация для accumulatedData"""
         
-        datetime_cols = []
-        numeric_cols = []
-        other_cols = []
+        # Если уже числовое, возвращаем как есть
+        if pd.api.types.is_numeric_dtype(series):
+            logger.debug(f"Колонка {column_name} уже числовая")
+            return series
         
-        for col in df.columns:
-            col_lower = col.lower()
+        # Особая обработка boolean колонок (rsi_divergence)
+        if series.dtype == 'bool' or column_name in ['rsi_divergence']:
+            logger.info(f"Конвертация boolean колонки {column_name}")
+            return series.astype(int)
+        
+        # Обработка строковых колонок
+        if series.dtype == 'object':
+            try:
+                # Попытка 1: Прямая конвертация
+                converted = pd.to_numeric(series, errors='coerce')
+                success_rate = 1 - converted.isna().sum() / len(series)
+                
+                if success_rate >= 0.8:
+                    logger.info(f"Конвертация {column_name}: {success_rate:.1%} (прямая)")
+                    return converted
+                    
+            except Exception:
+                pass
             
-            if any(pattern in col_lower for pattern in datetime_patterns):
-                datetime_cols.append(col)
-            elif any(pattern in col_lower for pattern in numeric_patterns):
-                numeric_cols.append(col)
-            else:
-                # Пытаемся определить по содержимому
-                sample_data = df[col].dropna().head(100).astype(str)
+            try:
+                # Попытка 2: Очистка строк (для accumulatedData специфично)
+                cleaned = series.astype(str)
                 
-                # Проверка на datetime
-                datetime_like = any(
-                    len(val) > 8 and ('-' in val or '/' in val or ':' in val)
-                    for val in sample_data
-                )
+                # Замена запятых на точки (европейский формат)
+                cleaned = cleaned.str.replace(',', '.', regex=False)
                 
-                if datetime_like:
-                    datetime_cols.append(col)
-                else:
-                    # Проверка на числовые данные
-                    numeric_count = 0
-                    for val in sample_data:
-                        cleaned_val = val.replace(',', '.').replace(' ', '').strip()
-                        try:
-                            float(cleaned_val)
-                            numeric_count += 1
-                        except ValueError:
-                            pass
+                # Убираем пробелы
+                cleaned = cleaned.str.strip()
+                
+                # Убираем символы валют и процентов
+                cleaned = cleaned.str.replace(r'[€$%₽£¥]', '', regex=True)
+                
+                # Обработка специальных значений в accumulatedData
+                cleaned = cleaned.replace(['nan', 'null', 'NaN', 'NULL', '', 'None', 'none'], np.nan)
+                
+                # Обработка научной нотации (если есть)
+                cleaned = cleaned.str.replace(r'([+-]?\d+\.?\d*)[eE]([+-]?\d+)', 
+                                            lambda m: str(float(m.group(0))), regex=True)
+                
+                converted = pd.to_numeric(cleaned, errors='coerce')
+                success_rate = 1 - converted.isna().sum() / len(series)
+                
+                if success_rate >= 0.8:
+                    logger.info(f"Конвертация {column_name}: {success_rate:.1%} (после очистки)")
+                    return converted
+                elif success_rate >= 0.5:
+                    logger.warning(f"Конвертация {column_name}: {success_rate:.1%} (частичная)")
+                    return converted
                     
-                    if numeric_count / len(sample_data) > 0.8:
-                        numeric_cols.append(col)
-                    else:
-                        other_cols.append(col)
+            except Exception as e:
+                logger.warning(f"Ошибка очистки {column_name}: {e}")
+            
+            try:
+                # Попытка 3: Агрессивная очистка - извлекаем только числа
+                numeric_pattern = r'([+-]?\d+\.?\d*)'
+                extracted = series.astype(str).str.extract(numeric_pattern, expand=False)
+                converted = pd.to_numeric(extracted, errors='coerce')
+                success_rate = 1 - converted.isna().sum() / len(series)
+                
+                if success_rate >= 0.5:
+                    logger.warning(f"Агрессивная конвертация {column_name}: {success_rate:.1%}")
+                    return converted
+                    
+            except Exception as e:
+                logger.warning(f"Ошибка агрессивной очистки {column_name}: {e}")
         
-        return {
-            'datetime': datetime_cols,
-            'numeric': numeric_cols,
-            'other': other_cols
-        }
+        # Если ничего не помогло
+        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось конвертировать {column_name}")
+        logger.error(f"Тип данных: {series.dtype}, Примеры значений: {series.head(3).tolist()}")
+        
+        # Возвращаем хотя бы что-то
+        return pd.to_numeric(series, errors='coerce')
     
     @staticmethod
-    def _convert_datetime_columns(df: pd.DataFrame, datetime_cols: List[str]) -> pd.DataFrame:
-        """Конвертация datetime колонок"""
-        result = df.copy()
-        
-        for col in datetime_cols:
-            if col in result.columns:
+    def _convert_datetime_accumulated(series: pd.Series, column_name: str) -> pd.Series:
+        """Специальная конвертация datetime для accumulatedData"""
+        try:
+            # Попытка 1: Стандартная конвертация
+            converted = pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
+            success_rate = 1 - converted.isna().sum() / len(series)
+            
+            if success_rate > 0.8:
+                logger.info(f"Datetime {column_name}: {success_rate:.1%}")
+                return converted
+            
+            # Попытка 2: Unix timestamp (если числа большие)
+            if series.dtype in ['int64', 'float64'] or all(str(x).isdigit() for x in series.dropna().head(10)):
                 try:
-                    # Пытаемся разные форматы
-                    if result[col].dtype == 'int64':
-                        # Unix timestamp
-                        result[col] = pd.to_datetime(result[col], unit='s', errors='coerce')
-                    else:
-                        result[col] = pd.to_datetime(result[col], errors='coerce')
-                    
-                    success_rate = 1 - result[col].isna().sum() / len(result)
-                    if success_rate < 0.5:
-                        logger.warning(f"Низкий успех конвертации datetime для {col}: {success_rate:.1%}")
-                    else:
-                        logger.info(f"Datetime колонка {col} обработана успешно: {success_rate:.1%}")
-                        
-                except Exception as e:
-                    logger.error(f"Ошибка конвертации datetime колонки {col}: {e}")
-        
-        return result
-    
-    @staticmethod
-    def _convert_numeric_columns(df: pd.DataFrame, numeric_cols: List[str]) -> pd.DataFrame:
-        """Конвертация числовых колонок"""
-        result = df.copy()
-        
-        for col in numeric_cols:
-            if col in result.columns:
+                    # Проверяем, похоже ли на Unix timestamp
+                    test_values = pd.to_numeric(series.dropna().head(10), errors='coerce')
+                    if test_values.min() > 1000000000:  # После 2001 года
+                        converted = pd.to_datetime(series, unit='s', errors='coerce')
+                        success_rate = 1 - converted.isna().sum() / len(series)
+                        if success_rate > 0.8:
+                            logger.info(f"Unix timestamp {column_name}: {success_rate:.1%}")
+                            return converted
+                except Exception:
+                    pass
+            
+            # Попытка 3: Попробуем разные форматы
+            formats_to_try = [
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%d',
+                '%d/%m/%Y %H:%M:%S',
+                '%d/%m/%Y',
+                '%m/%d/%Y %H:%M:%S',
+                '%m/%d/%Y'
+            ]
+            
+            for fmt in formats_to_try:
                 try:
-                    if pd.api.types.is_numeric_dtype(result[col]):
-                        continue
-                    
-                    # Преобразование в строку и очистка
-                    series = result[col].astype(str)
-                    series = series.str.replace(',', '.', regex=False)
-                    series = series.str.strip()
-                    series = series.str.replace(r'[€$%\s]', '', regex=True)
-                    series = series.replace(['nan', 'null', 'NaN', 'NULL', '', 'None'], np.nan)
-                    
-                    # Конвертация в числовой формат
-                    result[col] = pd.to_numeric(series, errors='coerce')
-                    
-                    success_rate = 1 - result[col].isna().sum() / len(result)
-                    if success_rate < 0.8:
-                        logger.warning(f"Низкий успех конвертации numeric для {col}: {success_rate:.1%}")
-                    else:
-                        logger.debug(f"Numeric колонка {col} обработана: {success_rate:.1%}")
-                        
-                except Exception as e:
-                    logger.error(f"Ошибка конвертации numeric колонки {col}: {e}")
-        
-        return result
+                    converted = pd.to_datetime(series, format=fmt, errors='coerce')
+                    success_rate = 1 - converted.isna().sum() / len(series)
+                    if success_rate > 0.8:
+                        logger.info(f"Datetime {column_name} с форматом {fmt}: {success_rate:.1%}")
+                        return converted
+                except Exception:
+                    continue
+            
+            # Если ничего не помогло, возвращаем исходное с предупреждением
+            logger.warning(f"Низкий успех datetime конвертации {column_name}: {success_rate:.1%}")
+            return pd.to_datetime(series, errors='coerce')
+            
+        except Exception as e:
+            logger.error(f"Ошибка конвертации datetime {column_name}: {e}")
+            return pd.to_datetime(series, errors='coerce')
     
     @staticmethod
     def clean_accumulated_data(df: pd.DataFrame) -> pd.DataFrame:
-        """Очистка данных из accumulatedData файлов (УЛУЧШЕННАЯ ВЕРСИЯ)"""
+        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Очистка данных accumulatedData формата"""
         df = df.copy()
         
         logger.info("Обнаружены данные accumulatedData")
+        logger.info(f"Исходный размер данных: {df.shape}")
         
-        # Обрабатываем временные колонки
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка всех колонок по типам
+        
+        # 1. Временные колонки
         time_columns = ['open_time', 'close_time']
         for col in time_columns:
             if col in df.columns:
-                try:
-                    # Пробуем разные форматы datetime
-                    df[col] = pd.to_datetime(df[col], errors='coerce', infer_datetime_format=True)
-                    success_rate = (1 - df[col].isna().sum() / len(df)) * 100
-                    
-                    if success_rate > 50:
-                        logger.info(f"Datetime колонка {col} обработана успешно: {success_rate:.1f}%")
-                    else:
-                        logger.warning(f"Низкий успех конвертации datetime для {col}: {success_rate:.1f}%")
-                        
-                except Exception as e:
-                    logger.warning(f"Не удалось обработать временную колонку {col}: {e}")
+                df[col] = DataAdapter._convert_datetime_accumulated(df[col], col)
         
-        # Определяем числовые колонки
-        numeric_columns = [
-            'open', 'high', 'low', 'close', 'volume',
+        # 2. Основные OHLCV колонки (критически важные)
+        ohlcv_columns = ['open', 'high', 'low', 'close', 'volume']
+        for col in ohlcv_columns:
+            if col in df.columns:
+                df[col] = DataAdapter._robust_numeric_conversion_accumulated(df[col], col)
+        
+        # 3. Технические индикаторы (большинство колонок)
+        indicator_columns = [
             'atr', 'atr_stop', 'atr_to_price_ratio',
             'fast_ema', 'slow_ema', 'ema_fast_deviation',
             'pchange', 'avpchange', 'gma', 'gma_smoothed',
             'positionBetweenBands', 'bollinger_position',
             'choppiness_index', 'volatility_percent',
-            'rsi_volatility', 'adx', 'rsi_divergence', 'rsi_delta', 'linear_regression'
+            'rsi_volatility', 'adx', 'rsi_delta', 'linear_regression'
         ]
         
-        # Конвертируем числовые колонки
-        for col in numeric_columns:
-            if col in df.columns and col not in time_columns:
-                try:
-                    # Сначала пробуем конвертировать как datetime (для некоторых странных случаев)
-                    if df[col].dtype == 'object':
-                        temp_datetime = pd.to_datetime(df[col], errors='coerce')
-                        datetime_success_rate = (1 - temp_datetime.isna().sum() / len(df)) * 100
-                        
-                        if datetime_success_rate > 50:
-                            logger.info(f"Datetime колонка {col} обработана успешно: {datetime_success_rate:.1f}%")
-                            df[col] = temp_datetime
-                            continue
-                        elif datetime_success_rate > 0:
-                            logger.warning(f"Низкий успех конвертации datetime для {col}: {datetime_success_rate:.1f}%")
-                    
-                    # Если не datetime, то конвертируем как число
-                    if df[col].dtype == 'object':
-                        df[col] = df[col].astype(str).str.replace(',', '.', regex=False).str.strip()
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                        
-                        numeric_success_rate = (1 - df[col].isna().sum() / len(df)) * 100
-                        if numeric_success_rate < 50:
-                            logger.warning(f"Низкий успех конвертации numeric для {col}: {numeric_success_rate:.1f}%")
-                            
-                except Exception as e:
-                    logger.warning(f"Не удалось конвертировать колонку {col}: {e}")
+        for col in indicator_columns:
+            if col in df.columns:
+                df[col] = DataAdapter._robust_numeric_conversion_accumulated(df[col], col)
         
-        # Сортировка по времени
+        # 4. Специальные колонки
+        if 'rsi_divergence' in df.columns:
+            # Boolean колонка
+            df['rsi_divergence'] = DataAdapter._robust_numeric_conversion_accumulated(df['rsi_divergence'], 'rsi_divergence')
+        
+        # Сигнальные колонки (могут быть строковыми)
+        signal_columns = ['ema_cross_signal', 'signal_gma', 'Bol']
+        for col in signal_columns:
+            if col in df.columns:
+                # Для сигнальных колонок делаем label encoding
+                if df[col].dtype == 'object':
+                    try:
+                        # Простое кодирование уникальных значений
+                        unique_vals = df[col].dropna().unique()
+                        if len(unique_vals) <= 10:  # Если мало уникальных значений
+                            df[col] = pd.Categorical(df[col]).codes
+                            df[col] = df[col].replace(-1, np.nan)  # -1 это NaN в codes
+                            logger.info(f"Label encoding для {col}: {len(unique_vals)} значений")
+                        else:
+                            # Слишком много значений, пробуем числовую конвертацию
+                            df[col] = DataAdapter._robust_numeric_conversion_accumulated(df[col], col)
+                    except Exception as e:
+                        logger.warning(f"Ошибка обработки сигнальной колонки {col}: {e}")
+                        df[col] = pd.Categorical(df[col]).codes
+        
+        # 5. Сортировка по времени
         if 'open_time' in df.columns and not df['open_time'].isna().all():
             try:
                 df = df.sort_values('open_time').reset_index(drop=True)
@@ -240,32 +246,51 @@ class DataAdapter:
             except Exception as e:
                 logger.warning(f"Не удалось отсортировать по времени: {e}")
         
-        # НОВОЕ: Удаление экстремальных изменений цены (выбросов)
-        if 'close' in df.columns and df['close'].dtype in ['float64', 'int64']:
+        # 6. Валидация OHLC данных
+        ohlc_available = [col for col in ['open', 'high', 'low', 'close'] if col in df.columns]
+        if len(ohlc_available) >= 4:
             try:
-                # Вычисляем процентные изменения
-                price_changes = df['close'].pct_change().abs()
+                # Проверка логических соотношений OHLC
+                before_fixes = len(df)
                 
-                # Определяем выбросы (изменения больше 20% за период)
-                extreme_threshold = 0.20  # 20%
+                # Удаляем строки с некорректными ценами
+                invalid_prices = (
+                    (df['open'] <= 0) | (df['high'] <= 0) | 
+                    (df['low'] <= 0) | (df['close'] <= 0) |
+                    (df['high'] < df['low']) |
+                    (df['high'] < df[['open', 'close']].max(axis=1)) |
+                    (df['low'] > df[['open', 'close']].min(axis=1))
+                )
+                
+                if invalid_prices.any():
+                    logger.warning(f"Найдено некорректных OHLC строк: {invalid_prices.sum()}")
+                    df = df[~invalid_prices].reset_index(drop=True)
+                    logger.info(f"Удалено строк: {before_fixes - len(df)}")
+                
+            except Exception as e:
+                logger.warning(f"Ошибка валидации OHLC: {e}")
+        
+        # 7. Обработка выбросов в ценах
+        if 'close' in df.columns and len(df) > 1:
+            try:
+                # Находим экстремальные изменения цены
+                price_changes = df['close'].pct_change().abs()
+                extreme_threshold = 0.20  # 20% изменение за период
                 extreme_changes = price_changes > extreme_threshold
                 
                 if extreme_changes.sum() > 0:
                     logger.warning(f"Найдено экстремальных изменений цены: {extreme_changes.sum()}")
                     
-                    # Опционально: можно удалить или сгладить выбросы
-                    # df = df[~extreme_changes]  # Удаление
-                    # Или сглаживание:
+                    # Сглаживаем выбросы вместо удаления
                     extreme_indices = df[extreme_changes].index
                     for idx in extreme_indices:
                         if idx > 0 and idx < len(df) - 1:
-                            # Заменяем выброс средним от соседних значений
                             df.loc[idx, 'close'] = (df.loc[idx-1, 'close'] + df.loc[idx+1, 'close']) / 2
                             
             except Exception as e:
-                logger.warning(f"Ошибка при обработке экстремальных изменений: {e}")
+                logger.warning(f"Ошибка обработки выбросов: {e}")
         
-        # НОВОЕ: Удаление дубликатов по времени
+        # 8. Удаление дубликатов по времени
         if 'open_time' in df.columns:
             try:
                 initial_rows = len(df)
@@ -276,88 +301,76 @@ class DataAdapter:
                     logger.info(f"Удалено дубликатов по времени: {removed_duplicates}")
                     
             except Exception as e:
-                logger.warning(f"Ошибка при удалении дубликатов: {e}")
+                logger.warning(f"Ошибка удаления дубликатов: {e}")
         
-        # Удаление строк с критичными NaN
-        critical_columns = ['open', 'high', 'low', 'close']
-        available_critical = [col for col in critical_columns if col in df.columns]
-        
-        if available_critical:
-            before_rows = len(df)
-            df = df.dropna(subset=available_critical)
-            after_rows = len(df)
-            
-            if before_rows != after_rows:
-                logger.info(f"Удалено строк с NaN в OHLC данных: {before_rows - after_rows}")
-        
-        # Заполнение остальных NaN
+        # 9. Финальная обработка NaN
+        # Для числовых колонок используем forward fill
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         if len(numeric_cols) > 0:
-            df[numeric_cols] = df[numeric_cols].ffill().bfill()
+            df[numeric_cols] = df[numeric_cols].ffill()
+            
+            # Если остались NaN в начале, используем backward fill
+            df[numeric_cols] = df[numeric_cols].bfill()
+        
+        # 10. Финальные проверки
+        final_numeric_cols = df.select_dtypes(include=[np.number]).columns
+        final_object_cols = df.select_dtypes(include=['object']).columns
         
         logger.info(f"Обработка завершена. Итоговый размер: {df.shape}")
+        logger.info(f"Числовые колонки: {len(final_numeric_cols)}")
+        logger.info(f"Object колонки: {len(final_object_cols)}")
+        
+        if len(final_object_cols) > 0:
+            logger.warning(f"Остались object колонки: {list(final_object_cols)}")
+            for col in final_object_cols:
+                if col not in ['open_time', 'close_time']:  # Эти могут быть datetime
+                    logger.warning(f"  {col}: {df[col].dtype}, примеры: {df[col].dropna().head(3).tolist()}")
         
         return df
     
     @staticmethod
-    def _validate_ohlc_data(df: pd.DataFrame) -> pd.DataFrame:
-        """Валидация OHLC данных"""
-        result = df.copy()
-        ohlc_columns = ['open', 'high', 'low', 'close']
-        available_ohlc = [col for col in ohlc_columns if col in result.columns]
+    def _identify_column_types(df: pd.DataFrame) -> Dict[str, List[str]]:
+        """Классификация колонок по типам для accumulatedData"""
+        datetime_columns = ['open_time', 'close_time']
         
-        if len(available_ohlc) < 4:
-            return result
+        numeric_columns = [
+            'open', 'high', 'low', 'close', 'volume',
+            'atr', 'atr_stop', 'atr_to_price_ratio',
+            'fast_ema', 'slow_ema', 'ema_fast_deviation',
+            'pchange', 'avpchange', 'gma', 'gma_smoothed',
+            'positionBetweenBands', 'bollinger_position',
+            'choppiness_index', 'volatility_percent',
+            'rsi_volatility', 'adx', 'rsi_delta', 'linear_regression',
+            'rsi_divergence'  # boolean -> numeric
+        ]
         
-        # Проверка логических соотношений
-        errors_fixed = 0
+        categorical_columns = ['ema_cross_signal', 'signal_gma', 'Bol']
         
-        # High должен быть >= max(open, close)
-        max_oc = result[['open', 'close']].max(axis=1)
-        invalid_high = result['high'] < max_oc
-        if invalid_high.any():
-            result.loc[invalid_high, 'high'] = max_oc[invalid_high]
-            errors_fixed += invalid_high.sum()
+        # Фильтруем только существующие колонки
+        datetime_cols = [col for col in datetime_columns if col in df.columns]
+        numeric_cols = [col for col in numeric_columns if col in df.columns]
+        categorical_cols = [col for col in categorical_columns if col in df.columns]
         
-        # Low должен быть <= min(open, close)
-        min_oc = result[['open', 'close']].min(axis=1)
-        invalid_low = result['low'] > min_oc
-        if invalid_low.any():
-            result.loc[invalid_low, 'low'] = min_oc[invalid_low]
-            errors_fixed += invalid_low.sum()
+        # Остальные колонки
+        all_classified = set(datetime_cols + numeric_cols + categorical_cols)
+        other_cols = [col for col in df.columns if col not in all_classified]
         
-        # Удаление строк с отрицательными или нулевыми ценами
-        negative_prices = (result[available_ohlc] <= 0).any(axis=1)
-        if negative_prices.any():
-            logger.warning(f"Удалено строк с некорректными ценами: {negative_prices.sum()}")
-            result = result[~negative_prices]
-        
-        # Проверка на экстремальные выбросы (изменение более 50% за период)
-        if len(result) > 1:
-            price_changes = result['close'].pct_change().abs()
-            extreme_changes = price_changes > 0.5
-            if extreme_changes.any():
-                logger.warning(f"Найдено экстремальных изменений цены: {extreme_changes.sum()}")
-                # Можно удалить или сгладить
-        
-        if errors_fixed > 0:
-            logger.info(f"Исправлено OHLC ошибок: {errors_fixed}")
-        
-        return result
+        return {
+            'datetime': datetime_cols,
+            'numeric': numeric_cols,
+            'categorical': categorical_cols,
+            'other': other_cols
+        }
     
     @staticmethod
     def adapt_to_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-        """Адаптация данных к формату OHLCV"""
+        """Адаптация данных к формату OHLCV (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
         result = df.copy()
         format_type = DataAdapter.detect_format(result)
         
         if format_type == 'ohlcv':
-            if 'open_time' in result.columns and 'atr' in result.columns:
-                logger.info("Обнаружены данные accumulatedData")
-                result = DataAdapter.clean_accumulated_data(result)
-            else:
-                result = DataAdapter.clean_accumulated_data(result)
-                
+            # Это наш случай - accumulatedData уже содержит OHLCV
+            result = DataAdapter.clean_accumulated_data(result)
         elif format_type == 'price_only':
             if 'close' not in result.columns:
                 raise ValueError("Не найдена колонка 'close'")
@@ -365,36 +378,33 @@ class DataAdapter:
             # Создание синтетического OHLC
             result['open'] = result['close'].shift(1).fillna(result['close'].iloc[0])
             
-            # Более реалистичное создание High/Low
             volatility = result['close'].pct_change().rolling(20).std().fillna(0.01)
             
             result['high'] = result[['open', 'close']].max(axis=1) * (1 + volatility * 0.5)
             result['low'] = result[['open', 'close']].min(axis=1) * (1 - volatility * 0.5)
             
-            logger.info("Создан синтетический OHLC из цены закрытия")
+            logger.info("Создан синтетический OHLC")
             
         elif format_type == 'indicators_only':
-            raise ValueError("Данные содержат только индикаторы без цен. Нужны OHLCV данные.")
-        
+            raise ValueError("Нужны OHLCV данные")
         else:
-            raise ValueError(f"Неизвестный формат данных. Колонки: {list(result.columns)}")
+            raise ValueError(f"Неизвестный формат: {list(result.columns)}")
         
-        # Добавляем volume если отсутствует или содержит NaN
+        # Добавляем volume если отсутствует
         if 'volume' not in result.columns:
-            logger.info("Колонка volume отсутствует, заполняем нулями")
-            result['volume'] = 0
-        else:
-            if result['volume'].isna().any():
-                median_volume = result['volume'].median()
-                fill_value = 0 if np.isnan(median_volume) else median_volume
-                result['volume'] = result['volume'].fillna(fill_value)
-                logger.info("Заполнены пропущенные значения volume")
+            if 'close' in result.columns:
+                price_change = result['close'].pct_change().abs().fillna(0)
+                base_volume = 5000000
+                result['volume'] = (base_volume * (1 + price_change * 10)).astype(int)
+            else:
+                result['volume'] = np.random.randint(1000000, 10000000, len(result))
+            logger.info("Добавлен синтетический volume")
         
         return result
     
     @staticmethod
     def validate_data_quality(df: pd.DataFrame) -> Dict[str, any]:
-        """Комплексная проверка качества данных"""
+        """Комплексная проверка качества данных для accumulatedData"""
         report = {
             'total_rows': len(df),
             'total_columns': len(df.columns),
@@ -424,43 +434,40 @@ class DataAdapter:
         available_ohlc = [col for col in ohlc_columns if col in df.columns]
         
         if len(available_ohlc) == 4:
-            # Проверка логических соотношений
-            invalid_high = (df['high'] < df[['open', 'close']].max(axis=1)).sum()
-            invalid_low = (df['low'] > df[['open', 'close']].min(axis=1)).sum()
-            
-            if invalid_high > 0:
-                report['data_issues'].append(f"Некорректных High значений: {invalid_high}")
-            if invalid_low > 0:
-                report['data_issues'].append(f"Некорректных Low значений: {invalid_low}")
+            try:
+                # Проверка логических соотношений
+                invalid_high = (df['high'] < df[['open', 'close']].max(axis=1)).sum()
+                invalid_low = (df['low'] > df[['open', 'close']].min(axis=1)).sum()
+                
+                if invalid_high > 0:
+                    report['data_issues'].append(f"Некорректных High значений: {invalid_high}")
+                if invalid_low > 0:
+                    report['data_issues'].append(f"Некорректных Low значений: {invalid_low}")
+            except Exception:
+                pass
         
         # Проверка временных данных
-        if report['datetime_columns']:
-            time_col = report['datetime_columns'][0]
-            if time_col in df.columns:
-                time_series = df[time_col].dropna()
+        if 'open_time' in df.columns:
+            try:
+                time_series = pd.to_datetime(df['open_time'], errors='coerce').dropna()
                 if len(time_series) > 1:
                     # Проверка на дубликаты времени
                     duplicates = time_series.duplicated().sum()
                     if duplicates > 0:
                         report['data_issues'].append(f"Дубликатов по времени: {duplicates}")
-                    
-                    # Проверка на пропуски во времени
-                    time_diff = time_series.diff().dropna()
-                    if len(time_diff) > 0:
-                        median_interval = time_diff.median()
-                        large_gaps = (time_diff > median_interval * 3).sum()
-                        if large_gaps > 0:
-                            report['data_issues'].append(f"Больших пропусков времени: {large_gaps}")
+            except Exception:
+                pass
         
         # Расчет общего балла качества
         quality_factors = []
         
         # Фактор полноты данных
-        completeness = 1 - (sum(info['count'] for info in report['missing_data'].values()) / (len(df) * len(df.columns)))
+        total_missing = sum(info['count'] for info in report['missing_data'].values())
+        completeness = 1 - (total_missing / (len(df) * len(df.columns)))
         quality_factors.append(completeness * 0.4)
         
         # Фактор корректности структуры
-        structure_score = 1.0 if len(available_ohlc) >= 3 else 0.5
+        structure_score = 1.0 if len(available_ohlc) >= 4 else 0.5
         quality_factors.append(structure_score * 0.3)
         
         # Фактор отсутствия критических проблем
