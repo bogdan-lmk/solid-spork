@@ -27,18 +27,36 @@ class DataAdapter:
     
     @staticmethod
     def load_csv(filepath: str, **kwargs) -> pd.DataFrame:
-        """Загрузка CSV с автоопределением разделителей"""
+        """Загрузка CSV с автоопределением разделителей и базовой валидацией"""
+        df = None
+
         for sep in [',', ';', '\t']:
             try:
-                df = pd.read_csv(filepath, sep=sep, **kwargs)
-                if len(df.columns) > 1:
-                    logger.info(f"CSV загружен с разделителем '{sep}', колонок: {len(df.columns)}")
-                    return df
+                tmp = pd.read_csv(filepath, sep=sep, **kwargs)
+                if len(tmp.columns) > 1:
+                    df = tmp
+                    logger.info(
+                        f"CSV загружен с разделителем '{sep}', колонок: {len(df.columns)}"
+                    )
+                    break
             except Exception:
                 continue
-        
-        df = pd.read_csv(filepath, **kwargs)
-        logger.info(f"CSV загружен с разделителем по умолчанию, колонок: {len(df.columns)}")
+
+        if df is None:
+            df = pd.read_csv(filepath, **kwargs)
+            logger.info(
+                f"CSV загружен с разделителем по умолчанию, колонок: {len(df.columns)}"
+            )
+
+        # Проверка NaN и типов данных
+        nan_count = int(df.isna().sum().sum())
+        if nan_count > 0:
+            logger.warning(f"В данных найдено NaN значений: {nan_count}")
+
+        object_cols = list(df.select_dtypes(include=['object']).columns)
+        if object_cols:
+            logger.warning(f"Колонки с типом object: {object_cols}")
+
         return df
     
     @staticmethod
