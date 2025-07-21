@@ -205,13 +205,14 @@ def create_test_data(n_rows: int = 500) -> pd.DataFrame:
         new_price = prices[-1] * (1 + trend + volatility)
         prices.append(max(new_price, 1))
     
+    volume_base = 5_000_000
     df = pd.DataFrame({
         'open_time': dates,
         'open': [p * (1 + np.random.normal(0, 0.005)) for p in prices],
         'high': [p * (1 + abs(np.random.normal(0, 0.01))) for p in prices],
         'low': [p * (1 - abs(np.random.normal(0, 0.01))) for p in prices],
         'close': prices,
-        'volume': np.random.randint(1000000, 10000000, n_rows)
+        'volume': volume_base
     })
     
     return df

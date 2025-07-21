@@ -361,16 +361,16 @@ class DataAdapter:
         else:
             raise ValueError(f"Неизвестный формат данных. Колонки: {list(result.columns)}")
         
-        # Добавляем volume если отсутствует
+        # Добавляем volume если отсутствует или содержит NaN
         if 'volume' not in result.columns:
-            # Более реалистичный объем на основе волатильности
-            if 'close' in result.columns:
-                price_change = result['close'].pct_change().abs().fillna(0)
-                base_volume = 5000000
-                result['volume'] = (base_volume * (1 + price_change * 10)).astype(int)
-            else:
-                result['volume'] = np.random.randint(1000000, 10000000, len(result))
-            logger.info("Добавлен синтетический объем торгов")
+            logger.info("Колонка volume отсутствует, заполняем нулями")
+            result['volume'] = 0
+        else:
+            if result['volume'].isna().any():
+                median_volume = result['volume'].median()
+                fill_value = 0 if np.isnan(median_volume) else median_volume
+                result['volume'] = result['volume'].fillna(fill_value)
+                logger.info("Заполнены пропущенные значения volume")
         
         return result
     
