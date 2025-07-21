@@ -20,6 +20,7 @@ from config import ModelConfig
 from data_types import PredictionResult
 from feature_engineer import FeatureEngineer
 from model_evaluator import ModelEvaluator
+from data_adapter import DataAdapter
 
 # ONNX экспорт
 try:
@@ -177,7 +178,21 @@ class RSIPredictor:
                 logger.warning(f"Найдены object колонки: {list(object_cols)[:5]}")
             
             total_features = len([col for col in df_features.columns if col not in ['open', 'high', 'low', 'close', 'volume']])
+
             logger.info(f"Создано признаков: {total_features}")
+
+            # Статистика пропусков
+            missing = (df_features.isna().sum() / len(df_features) * 100).sort_values(ascending=False)
+            logger.info("Пропуски в данных (топ 5):")
+            for col, pct in missing.head(5).items():
+                if pct > 0:
+                    logger.info(f"  {col}: {pct:.1f}%")
+
+            # Базовые метрики качества
+            quality = DataAdapter.validate_data_quality(df_features)
+            logger.info(
+                f"Качество данных: строк={quality['total_rows']}, колонки={quality['total_columns']}, score={quality['quality_score']:.2f}"
+            )
             
             # Подготовка данных
             X, y = self._prepare_features(df_features)
