@@ -256,7 +256,15 @@ def main():
                 # Проверяем качество данных
                 if 'rsi_volatility' in data_file.columns:
                     rsi_data = data_file['rsi_volatility'].dropna()
-                    print(f"RSI volatility: {len(rsi_data)} валидных значений, диапазон: [{rsi_data.min():.2f}, {rsi_data.max():.2f}]")
+                    # Значения могут быть строковыми, пытаемся привести к числу
+                    rsi_numeric = pd.to_numeric(rsi_data, errors='coerce')
+                    valid_rsi = rsi_numeric.dropna()
+                    if len(valid_rsi) > 0:
+                        print(
+                            f"RSI volatility: {len(valid_rsi)} валидных значений, диапазон: [{valid_rsi.min():.2f}, {valid_rsi.max():.2f}]"
+                        )
+                    else:
+                        print(f"RSI volatility: нет валидных числовых значений")
                 
                 if 'open_time' in data_file.columns:
                     time_data = data_file['open_time'].dropna()
