@@ -76,8 +76,8 @@ class DataAdapter:
                 # Замена запятых на точки (европейский формат)
                 cleaned = cleaned.str.replace(',', '.', regex=False)
                 
-                # Убираем пробелы
-                cleaned = cleaned.str.strip()
+                # Убираем пробелы и кавычки
+                cleaned = cleaned.str.strip().str.replace('"', '').str.replace("'", "")
                 
                 # Убираем символы валют и процентов
                 cleaned = cleaned.str.replace(r'[€$%₽£¥]', '', regex=True)
@@ -88,6 +88,11 @@ class DataAdapter:
                 # Обработка научной нотации (если есть)
                 cleaned = cleaned.str.replace(r'([+-]?\d+\.?\d*)[eE]([+-]?\d+)', 
                                             lambda m: str(float(m.group(0))), regex=True)
+                
+                # Для критических колонок (OHLCV) делаем более агрессивную очистку
+                if column_name in ['open', 'high', 'low', 'close', 'volume']:
+                    # Удаляем все нечисловые символы кроме точек и минусов
+                    cleaned = cleaned.str.replace(r'[^\d\.\-]', '', regex=True)
                 
                 converted = pd.to_numeric(cleaned, errors='coerce')
                 success_rate = 1 - converted.isna().sum() / len(series)
@@ -184,6 +189,15 @@ class DataAdapter:
         
         logger.info("Обнаружены данные accumulatedData")
         logger.info(f"Исходный размер данных: {df.shape}")
+        
+        # Критические колонки, которые не могут содержать NaN
+        critical_columns = ['open', 'high', 'low', 'close', 'volume']
+        
+        # Проверка наличия критических колонок
+        missing_critical = [col for col in critical_columns if col not in df.columns]
+        if missing_critical:
+            logger.error(f"Отсутствуют критические колонки: {missing_critical}")
+            raise ValueError(f"Отсутствуют критические колонки: {missing_critical}")
         
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка всех колонок по типам
         
@@ -311,6 +325,15 @@ class DataAdapter:
             
             # Если остались NaN в начале, используем backward fill
             df[numeric_cols] = df[numeric_cols].bfill()
+            
+            # Для критических колонок проверяем отсутствие NaN
+            critical_cols = [col for col in critical_columns if col in numeric_cols]
+            for col in critical_cols:
+                if df[col].isna().any():
+                    # Заменяем NaN на среднее значение
+                    col_mean = df[col].mean()
+                    df[col] = df[col].fillna(col_mean)
+                    logger.warning(f"Заменены NaN в критической колонке {col} на среднее значение {col_mean:.2f}")
         
         # 10. Финальные проверки
         final_numeric_cols = df.select_dtypes(include=[np.number]).columns

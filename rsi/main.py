@@ -32,7 +32,6 @@ def find_all_data_files():
         current_dir / "data",           # ./data/
         current_dir.parent / "data",    # ../data/
         current_dir,                    # текущая папка
-        current_dir.parent,             # родительская папка
         Path.cwd() / "data",           # рабочая_директория/data/
         Path.cwd()                      # рабочая директория
     ]
@@ -40,11 +39,6 @@ def find_all_data_files():
     # Паттерны файлов для поиска (в порядке приоритета)
     file_patterns = [
         "accumulatedData_*.csv",     # Ваши основные файлы
-        "*accumulated*.csv",         # Любые файлы с accumulated
-        "*ohlc*.csv",               # OHLC данные
-        "*trading*.csv",            # Торговые данные
-        "*market*.csv",             # Рыночные данные
-        "*price*.csv",              # Ценовые данные
         "*.csv"                     # Любые CSV (будет последним)
     ]
     
@@ -84,12 +78,7 @@ def find_all_data_files():
     # Сортируем по приоритету и размеру
     priority_order = {
         "accumulatedData_*.csv": 1,
-        "*accumulated*.csv": 2,
-        "*ohlc*.csv": 3,
-        "*trading*.csv": 4,
-        "*market*.csv": 5,
-        "*price*.csv": 6,
-        "*.csv": 7
+        "*.csv": 2
     }
     
     found_files_info.sort(key=lambda x: (
