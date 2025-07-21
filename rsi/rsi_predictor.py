@@ -1,5 +1,5 @@
 """
-Основной класс RSI предиктора (КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ПОД accumulatedData)
+Основной класс RSI предиктора - ИСПРАВЛЕННАЯ ВЕРСИЯ без утечки данных
 """
 import pandas as pd
 import numpy as np
@@ -8,10 +8,10 @@ import logging
 from pathlib import Path
 from typing import Tuple, List, Optional, Union, Dict
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, accuracy_score
 from sklearn.preprocessing import RobustScaler
-from catboost import CatBoostRegressor
-from xgboost import XGBRegressor
+from catboost import CatBoostRegressor, CatBoostClassifier
+from xgboost import XGBRegressor, XGBClassifier
 
 # Импорты наших модулей
 from config import ModelConfig
@@ -22,49 +22,55 @@ from model_evaluator import ModelEvaluator
 logger = logging.getLogger(__name__)
 
 class RSIPredictor:
-    """КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ: Предиктор RSI без утечки данных и с правильной валидацией"""
+    """ИСПРАВЛЕННЫЙ предиктор RSI без утечки данных с правильной валидацией"""
     
     def __init__(self, config: Optional[ModelConfig] = None):
         self.config = config or ModelConfig()
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Параметры против переобучения
+        # Используем консервативные параметры против переобучения
         if self.config.model_type == 'catboost':
             self.config.catboost_params.update({
-                'iterations': 400,          # Еще меньше итераций для accumulatedData
-                'learning_rate': 0.05,      # Немного увеличили для стабильности
+                'iterations': 300,          # Умеренное количество итераций
+                'learning_rate': 0.05,      # Умеренная скорость обучения
                 'depth': 4,                 # Ограничиваем глубину
-                'l2_leaf_reg': 15,          # Усиленная регуляризация
+                'l2_leaf_reg': 15,          # Регуляризация
                 'early_stopping_rounds': 50,
                 'verbose': False,
                 'random_seed': 42
             })
         
-        self.model = None
-        self.scaler = RobustScaler()  # Устойчив к выбросам
+        # Модели для разных типов предсказаний
+        self.models = {}  # {'value': model, 'change': model, 'direction': model}
+        self.scalers = {}  # {'value': scaler, 'change': scaler, 'direction': scaler}
         self.feature_names: List[str] = []
         self.is_trained = False
-        self._feature_stats = {}  # Для отладки
+        self._feature_stats = {}
         
-    def _get_model(self):
+    def _get_model(self, model_type: str = 'regression'):
         """Создание модели согласно конфигурации"""
         if self.config.model_type == 'catboost':
-            return CatBoostRegressor(**self.config.catboost_params)
+            if model_type == 'classification':
+                params = self.config.catboost_params.copy()
+                params.update({'loss_function': 'MultiClass'})
+                return CatBoostClassifier(**params)
+            else:
+                return CatBoostRegressor(**self.config.catboost_params)
         elif self.config.model_type == 'xgboost':
-            return XGBRegressor(**self.config.xgboost_params)
+            if model_type == 'classification':
+                return XGBClassifier(**self.config.xgboost_params)
+            else:
+                return XGBRegressor(**self.config.xgboost_params)
         else:
             raise ValueError(f"Неподдерживаемый тип модели: {self.config.model_type}")
     
-    def _prepare_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготовка признаков специально для accumulatedData"""
+    def _prepare_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, pd.Series]]:
+        """ИСПРАВЛЕННАЯ подготовка признаков"""
         
         # Исключаем временные и целевые колонки
         exclude_columns = {
-            'rsi_next',           # Целевая переменная
-            'open_time',          # Временные колонки
-            'close_time',
-            'ema_cross_signal',   # Категориальные сигналы (пока исключаем)
-            'signal_gma',
-            'Bol'
+            'target_rsi_next', 'target_rsi_change', 'target_rsi_direction',  # Целевые переменные
+            'open_time', 'close_time',  # Временные колонки
+            'ema_cross_signal', 'signal_gma', 'Bol'  # Категориальные (пока исключаем)
         }
         
         # Получаем все остальные колонки как признаки
@@ -77,17 +83,21 @@ class RSIPredictor:
         
         logger.info(f"Потенциальных признаков: {len(feature_columns)}")
         
-        # Проверяем наличие целевой переменной
-        if 'rsi_next' not in df.columns:
-            raise ValueError("Отсутствует целевая переменная 'rsi_next'")
+        # Проверяем наличие целевых переменных
+        targets = {}
+        for target_name in ['target_rsi_next', 'target_rsi_change', 'target_rsi_direction']:
+            if target_name in df.columns:
+                targets[target_name] = df[target_name].copy()
         
-        # Получаем данные
+        if not targets:
+            raise ValueError("Отсутствуют целевые переменные")
+        
+        # Получаем признаки
         X = df[feature_columns].copy()
-        y = df['rsi_next'].copy()
         
-        logger.info(f"Исходные данные: X={X.shape}, y={y.shape}")
+        logger.info(f"Исходные данные: X={X.shape}, targets={len(targets)}")
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительная конвертация всех признаков в числовой формат
+        # Конвертация в числовой формат
         from data_adapter import DataAdapter
         
         numeric_converted = 0
@@ -110,98 +120,75 @@ class RSIPredictor:
         
         X_numeric = X[numeric_columns].copy()
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Умная очистка данных
-        # 1. Удаляем строки с NaN в целевой переменной
-        valid_target_mask = ~y.isna()
+        # Умная очистка данных
+        valid_masks = {}
         
-        # 2. Проверяем важные OHLC колонки
-        ohlc_columns = ['open', 'high', 'low', 'close']
-        available_ohlc = [col for col in ohlc_columns if col in X_numeric.columns]
-        
-        if available_ohlc:
-            # Если есть OHLC, они должны быть валидными
-            valid_ohlc_mask = ~X_numeric[available_ohlc].isna().any(axis=1)
-            valid_mask = valid_target_mask & valid_ohlc_mask
-            logger.info(f"Используем OHLC колонки для валидации: {available_ohlc}")
-        else:
-            # Если нет OHLC, проверяем первые важные колонки
-            important_cols = numeric_columns[:min(5, len(numeric_columns))]
+        # Создаем маску валидности для каждой целевой переменной
+        for target_name, target_series in targets.items():
+            valid_target_mask = ~target_series.isna()
+            
+            # Проверяем важные колонки для признаков
+            important_cols = numeric_columns[:min(10, len(numeric_columns))]
             valid_features_mask = ~X_numeric[important_cols].isna().any(axis=1)
-            valid_mask = valid_target_mask & valid_features_mask
-            logger.info(f"Используем важные колонки для валидации: {important_cols}")
+            
+            combined_mask = valid_target_mask & valid_features_mask
+            valid_masks[target_name] = combined_mask
+            
+            logger.info(f"Для {target_name}: {combined_mask.sum()} валидных строк из {len(combined_mask)}")
         
-        # Применяем маску
-        X_clean = X_numeric[valid_mask].copy()
-        y_clean = y[valid_mask].copy()
-        
-        logger.info(f"После очистки NaN: {len(X_clean)} строк из {len(X_numeric)} ({len(X_clean)/len(X_numeric)*100:.1f}%)")
-        
-        if len(X_clean) == 0:
-            raise ValueError("После удаления NaN не осталось данных")
-        
-        if len(X_clean) < 30:
-            raise ValueError(f"Слишком мало данных после очистки: {len(X_clean)} < 30")
-        
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Интеллектуальный отбор признаков
-        # 1. Удаляем признаки с нулевой дисперсией
-        variance = X_clean.var()
+        # Интеллектуальный отбор признаков
+        variance = X_numeric.var()
         zero_variance_features = variance[variance <= 1e-8].index.tolist()
         
         if zero_variance_features:
             logger.warning(f"Удаляем {len(zero_variance_features)} признаков с нулевой дисперсией")
-            X_clean = X_clean.drop(columns=zero_variance_features)
+            X_numeric = X_numeric.drop(columns=zero_variance_features)
             variance = variance.drop(zero_variance_features)
         
-        # 2. Удаляем признаки с слишком большим количеством NaN
-        nan_threshold = 0.5  # Максимум 50% NaN
+        # Удаляем признаки с слишком большим количеством NaN
+        nan_threshold = 0.5
         high_nan_features = []
-        for col in X_clean.columns:
-            nan_ratio = X_clean[col].isna().sum() / len(X_clean)
+        for col in X_numeric.columns:
+            nan_ratio = X_numeric[col].isna().sum() / len(X_numeric)
             if nan_ratio > nan_threshold:
                 high_nan_features.append(col)
         
         if high_nan_features:
-            logger.warning(f"Удаляем {len(high_nan_features)} признаков с >50% NaN: {high_nan_features[:3]}...")
-            X_clean = X_clean.drop(columns=high_nan_features)
+            logger.warning(f"Удаляем {len(high_nan_features)} признаков с >50% NaN")
+            X_numeric = X_numeric.drop(columns=high_nan_features)
             variance = variance.drop(high_nan_features)
         
-        # 3. КРИТИЧЕСКОЕ ОГРАНИЧЕНИЕ: Максимум 25 признаков против переобучения
-        max_features = min(15, len(variance))
+        # Ограничиваем количество признаков против переобучения
+        max_features = 20
         
         if len(variance) > max_features:
-            # Отбираем признаки по дисперсии (более информативные)
-            top_features = variance.sort_values(ascending=False).head(max_features).index.tolist()
+            # Отбираем по дисперсии + приоритет rsi_volatility связанным
+            top_features = variance.sort_values(ascending=False).head(max_features * 2).index.tolist()
             
-            # Приоритет RSI-коррелирующим признакам
-            rsi_related = [col for col in top_features if 'rsi' in col.lower() or 
-                          any(keyword in col.lower() for keyword in ['stoch', 'williams', 'cci', 'macd', 'bb_percent', 'mfi'])]
-            
+            # Приоритет признакам связанным с rsi_volatility
+            rsi_related = [col for col in top_features if 'rsi_volatility' in col or 'rsi' in col.lower()]
             other_features = [col for col in top_features if col not in rsi_related]
             
-            # Берем до 15 RSI-related + остальные до 25 общих
-            selected_features = rsi_related[:15] + other_features[:max_features-len(rsi_related[:15])]
+            selected_features = rsi_related[:max_features//2] + other_features[:max_features-len(rsi_related[:max_features//2])]
             
-            logger.info(f"Отобрано {len(selected_features)} признаков из {len(variance)} (RSI-related: {len(rsi_related[:15])})")
+            logger.info(f"Отобрано {len(selected_features)} признаков из {len(variance)}")
         else:
             selected_features = variance.index.tolist()
             logger.info(f"Используем все {len(selected_features)} признаков")
         
-        X_final = X_clean[selected_features].copy()
+        X_final = X_numeric[selected_features].copy()
         
-        # Финальная обработка NaN в отобранных признаках
+        # Финальная обработка NaN
         for col in X_final.columns:
             if X_final[col].isna().any():
-                # Заполняем медианой для устойчивости
                 median_val = X_final[col].median()
                 X_final[col] = X_final[col].fillna(median_val)
-                logger.debug(f"Заполнены NaN в {col} медианой: {median_val:.4f}")
         
         # Сохраняем информацию о признаках
         self.feature_names = selected_features
         self._feature_stats = {
             'total_original': len(feature_columns),
             'numeric_converted': numeric_converted,
-            'after_cleaning': len(X_clean),
             'final_selected': len(selected_features),
             'removed_zero_variance': len(zero_variance_features),
             'removed_high_nan': len(high_nan_features)
@@ -210,12 +197,23 @@ class RSIPredictor:
         logger.info(f"Подготовка признаков завершена:")
         logger.info(f"  Финальных признаков: {len(self.feature_names)}")
         logger.info(f"  Финальный размер данных: {X_final.shape}")
-        logger.info(f"  Целевая переменная: {y_clean.shape}")
         
-        return X_final, y_clean
+        # Применяем маски валидности к данным и целевым переменным
+        cleaned_targets = {}
+        for target_name, target_series in targets.items():
+            mask = valid_masks[target_name]
+            X_clean = X_final[mask].copy()
+            y_clean = target_series[mask].copy()
+            
+            if len(X_clean) > 0:
+                cleaned_targets[target_name] = (X_clean, y_clean)
+            else:
+                logger.warning(f"Нет данных для {target_name} после очистки")
+        
+        return X_final, cleaned_targets
     
     def train(self, df: pd.DataFrame, save_path: Optional[str] = None) -> Dict[str, float]:
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обучение с временной валидацией и защитой от переобучения"""
+        """ИСПРАВЛЕННОЕ обучение с временной валидацией"""
         logger.info("Начинаем обучение RSI предиктора...")
         logger.info(f"Входные данные: {df.shape}")
         
@@ -224,138 +222,100 @@ class RSIPredictor:
             df_features = FeatureEngineer.create_all_features(df)
             logger.info(f"После создания признаков: {df_features.shape}")
             
-            # Отладочная информация о типах данных
-            numeric_cols = df_features.select_dtypes(include=[np.number]).columns
-            datetime_cols = df_features.select_dtypes(include=['datetime64']).columns
-            object_cols = df_features.select_dtypes(include=['object']).columns
-            
-            logger.info(f"Типы колонок после создания признаков:")
-            logger.info(f"  Числовые колонки: {len(numeric_cols)}")
-            logger.info(f"  Временные колонки: {len(datetime_cols)}")
-            logger.info(f"  Object колонки: {len(object_cols)}")
-            
-            if len(object_cols) > 0:
-                logger.warning(f"Найдены object колонки: {list(object_cols)[:5]}")
-            
             # Подготовка данных
-            X, y = self._prepare_features(df_features)
-            logger.info(f"Подготовленные данные: X={X.shape}, y={y.shape}")
+            X_full, cleaned_targets = self._prepare_features(df_features)
             
-            # Проверка минимального размера данных
-            if len(X) < 50:
-                logger.warning(f"Мало данных для обучения: {len(X)} строк")
-                if len(X) < 30:
-                    raise ValueError(f"Критически мало данных: {len(X)} < 30")
+            results = {}
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Временное разделение (НЕ случайное!)
-            # Сортируем по индексу чтобы сохранить временной порядок
-            X = X.sort_index()
-            y = y.sort_index()
-            
-            split_idx = int(len(X) * (1 - self.config.test_size))
-            
-            if split_idx < 20:
-                raise ValueError(f"Слишком мало данных для train/test разделения: train={split_idx}")
-            
-            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-            y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-            
-            logger.info(f"Временное разделение:")
-            logger.info(f"  Train: {len(X_train)} строк ({len(X_train)/len(X)*100:.1f}%)")
-            logger.info(f"  Test: {len(X_test)} строк ({len(X_test)/len(X)*100:.1f}%)")
-            
-            # Масштабирование данных
-            logger.info("Масштабирование признаков...")
-            X_train_scaled = pd.DataFrame(
-                self.scaler.fit_transform(X_train),
-                columns=self.feature_names,
-                index=X_train.index
-            )
-            X_test_scaled = pd.DataFrame(
-                self.scaler.transform(X_test),
-                columns=self.feature_names,
-                index=X_test.index
-            )
-            
-            # Проверка масштабирования
-            logger.info(f"Масштабирование: среднее={X_train_scaled.mean().mean():.4f}, std={X_train_scaled.std().mean():.4f}")
-            
-            # Обучение модели
-            logger.info("Обучение модели...")
-            self.model = self._get_model()
-            
-            if self.config.model_type == 'catboost':
-                self.model.fit(
-                    X_train_scaled, y_train,
-                    eval_set=(X_test_scaled, y_test),
-                    use_best_model=True
-                )
-            else:
-                self.model.fit(X_train_scaled, y_train)
-            
-            logger.info("Модель обучена успешно")
-            
-            # Предсказания
-            y_pred_train = self.model.predict(X_train_scaled)
-            y_pred_test = self.model.predict(X_test_scaled)
-            
-            # Ограничиваем предсказания RSI диапазоном 0-100
-            y_pred_train = np.clip(y_pred_train, 0, 100)
-            y_pred_test = np.clip(y_pred_test, 0, 100)
-            
-            # Оценка качества
-            train_metrics = ModelEvaluator.calculate_metrics(y_train, y_pred_train)
-            test_metrics = ModelEvaluator.calculate_metrics(y_test, y_pred_test)
-            
-            # Печать результатов
-            ModelEvaluator.print_evaluation(train_metrics, test_metrics)
-            
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Временная кросс-валидация
-            try:
-                cv_scores = self._time_series_cross_validate(X_train_scaled, y_train)
-                cv_mean = cv_scores.mean()
-                cv_std = cv_scores.std()
-                logger.info(f"CV R² score: {cv_mean:.4f} ± {cv_std:.4f}")
+            # Обучаем модели для каждого типа предсказания
+            for target_name, (X_clean, y_clean) in cleaned_targets.items():
+                logger.info(f"\nОбучение модели для {target_name}: X={X_clean.shape}, y={y_clean.shape}")
                 
-                # Проверка стабильности
-                if cv_std > 0.2:
-                    logger.warning(f"Высокая нестабильность CV: std={cv_std:.4f}")
-                elif cv_std < 0.05:
-                    logger.info(f"Стабильная модель: std={cv_std:.4f}")
-                    
+                if len(X_clean) < 30:
+                    logger.warning(f"Слишком мало данных для {target_name}: {len(X_clean)}")
+                    continue
+                
+                # Временное разделение данных
+                split_idx = int(len(X_clean) * (1 - self.config.test_size))
+                
+                X_train, X_test = X_clean.iloc[:split_idx], X_clean.iloc[split_idx:]
+                y_train, y_test = y_clean.iloc[:split_idx], y_clean.iloc[split_idx:]
+                
+                logger.info(f"  Train: {len(X_train)}, Test: {len(X_test)}")
+                
+                # Масштабирование
+                scaler = RobustScaler()
+                X_train_scaled = pd.DataFrame(
+                    scaler.fit_transform(X_train),
+                    columns=self.feature_names,
+                    index=X_train.index
+                )
+                X_test_scaled = pd.DataFrame(
+                    scaler.transform(X_test),
+                    columns=self.feature_names,
+                    index=X_test.index
+                )
+                
+                # Определяем тип модели
+                model_type = 'classification' if 'direction' in target_name else 'regression'
+                
+                # Обучение модели
+                model = self._get_model(model_type)
+                
+                if self.config.model_type == 'catboost':
+                    model.fit(
+                        X_train_scaled, y_train,
+                        eval_set=(X_test_scaled, y_test) if len(X_test) > 5 else None,
+                        use_best_model=True if len(X_test) > 5 else False
+                    )
+                else:
+                    model.fit(X_train_scaled, y_train)
+                
+                # Предсказания
+                y_pred_train = model.predict(X_train_scaled)
+                y_pred_test = model.predict(X_test_scaled)
+                
+                # Ограничиваем предсказания для RSI
+                if 'next' in target_name:
+                    y_pred_train = np.clip(y_pred_train, 0, 100)
+                    y_pred_test = np.clip(y_pred_test, 0, 100)
+                
+                # Оценка качества
+                if model_type == 'regression':
+                    train_metrics = ModelEvaluator.calculate_metrics(y_train, y_pred_train)
+                    test_metrics = ModelEvaluator.calculate_metrics(y_test, y_pred_test)
+                    ModelEvaluator.print_evaluation(train_metrics, test_metrics)
+                else:
+                    # Для классификации
+                    train_acc = accuracy_score(y_train, y_pred_train)
+                    test_acc = accuracy_score(y_test, y_pred_test)
+                    logger.info(f"  Accuracy - Train: {train_acc:.3f}, Test: {test_acc:.3f}")
+                    test_metrics = {'accuracy': test_acc, 'train_accuracy': train_acc}
+                
+                # Сохраняем модель и скалер
+                model_key = target_name.replace('target_rsi_', '')
+                self.models[model_key] = model
+                self.scalers[model_key] = scaler
+                
+                results[model_key] = test_metrics
+            
+            # Кросс-валидация
+            try:
+                if 'next' in cleaned_targets:
+                    X_cv, y_cv = cleaned_targets['target_rsi_next']
+                    cv_scores = self._time_series_cross_validate(X_cv, y_cv)
+                    logger.info(f"CV R² score: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
             except Exception as cv_error:
                 logger.warning(f"Кросс-валидация не удалась: {cv_error}")
             
-            # Проверка переобучения
-            overfitting_score = abs(train_metrics['r2'] - test_metrics['r2'])
-            if overfitting_score < 0.1:
-                logger.info(f"✅ Переобучение под контролем: {overfitting_score:.3f}")
-            elif overfitting_score < 0.2:
-                logger.warning(f"⚠️ Умеренное переобучение: {overfitting_score:.3f}")
-            else:
-                logger.error(f"❌ Сильное переобучение: {overfitting_score:.3f}")
-            
             self.is_trained = True
-            
-            # Логирование статистики признаков
-            logger.info(f"Статистика признаков: {self._feature_stats}")
             
             # Сохранение модели
             if save_path:
                 self.save(save_path)
-                logger.info(f"Модель сохранена: {save_path}")
+                logger.info(f"Модели сохранены: {save_path}")
             
-            # Добавляем дополнительные метрики в результат
-            test_metrics.update({
-                'overfitting_score': overfitting_score,
-                'cv_mean': cv_scores.mean() if 'cv_scores' in locals() else None,
-                'cv_std': cv_scores.std() if 'cv_scores' in locals() else None,
-                'n_features': len(self.feature_names),
-                'train_size': len(X_train),
-                'test_size': len(X_test)
-            })
-            
-            return test_metrics
+            return results
             
         except Exception as e:
             logger.error(f"Критическая ошибка при обучении: {e}")
@@ -364,170 +324,136 @@ class RSIPredictor:
             raise
     
     def _time_series_cross_validate(self, X: pd.DataFrame, y: pd.Series) -> np.ndarray:
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная временная кросс-валидация"""
-        # Ограничиваем количество фолдов для стабильности
+        """Временная кросс-валидация"""
         n_splits = min(self.config.cv_folds, 3)
         tscv = TimeSeriesSplit(n_splits=n_splits)
         cv_scores = []
-        
-        logger.info(f"Временная кросс-валидация с {n_splits} фолдами...")
         
         for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X)):
             try:
                 X_cv_train, X_cv_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_cv_train, y_cv_val = y.iloc[train_idx], y.iloc[val_idx]
                 
-                # Проверка минимального размера для стабильности
-                if len(X_cv_train) < 20:
-                    logger.warning(f"Фолд {fold_idx}: слишком мало train данных ({len(X_cv_train)})")
-                    continue
-                    
-                if len(X_cv_val) < 5:
-                    logger.warning(f"Фолд {fold_idx}: слишком мало val данных ({len(X_cv_val)})")
+                if len(X_cv_train) < 10 or len(X_cv_val) < 3:
                     continue
                 
                 # Обучение модели для фолда
-                model = self._get_model()
-                model.fit(X_cv_train, y_cv_train)
+                scaler = RobustScaler()
+                X_cv_train_scaled = scaler.fit_transform(X_cv_train)
+                X_cv_val_scaled = scaler.transform(X_cv_val)
                 
-                # Предсказание и оценка
-                y_cv_pred = model.predict(X_cv_val)
-                y_cv_pred = np.clip(y_cv_pred, 0, 100)  # Ограничиваем RSI
+                model = self._get_model('regression')
+                model.fit(X_cv_train_scaled, y_cv_train)
+                
+                y_cv_pred = model.predict(X_cv_val_scaled)
+                y_cv_pred = np.clip(y_cv_pred, 0, 100)
                 
                 score = r2_score(y_cv_val, y_cv_pred)
                 cv_scores.append(score)
-                
-                logger.debug(f"Фолд {fold_idx}: R²={score:.4f}, train={len(X_cv_train)}, val={len(X_cv_val)}")
                 
             except Exception as e:
                 logger.warning(f"Ошибка в фолде {fold_idx}: {e}")
                 continue
         
-        if not cv_scores:
-            raise ValueError("Все фолды кросс-валидации провалились")
-        
-        logger.info(f"CV завершена: {len(cv_scores)} успешных фолдов из {n_splits}")
-        
-        return np.array(cv_scores)
+        return np.array(cv_scores) if cv_scores else np.array([0.0])
     
     def predict(self, df: pd.DataFrame, return_confidence: bool = False) -> Union[float, PredictionResult]:
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Предсказание БЕЗ утечки данных"""
+        """ИСПРАВЛЕННОЕ предсказание БЕЗ утечки данных"""
         if not self.is_trained:
             raise ValueError("Модель не обучена! Используйте метод train()")
         
         try:
             logger.info(f"Предсказание для данных: {df.shape}")
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем признаки БЕЗ целевой переменной
+            # Создаем признаки БЕЗ целевых переменных
             df_features = self._create_features_for_prediction(df)
             
-            # Используем тот же процесс подготовки, что и при обучении
+            # Получаем текущее значение RSI
+            current_rsi = float(df['rsi_volatility'].iloc[-1]) if 'rsi_volatility' in df.columns else 50.0
+            
+            # Получаем признаки для последней строки
             exclude_columns = {
-                'rsi_next',           # ВАЖНО: исключаем целевую переменную!
+                'target_rsi_next', 'target_rsi_change', 'target_rsi_direction',
                 'open_time', 'close_time',
                 'ema_cross_signal', 'signal_gma', 'Bol'
             }
             
-            all_columns = set(df_features.columns)
-            feature_columns = [col for col in all_columns 
+            feature_columns = [col for col in df_features.columns 
                               if col not in exclude_columns and not col.startswith('Unnamed')]
-            
-            if not feature_columns:
-                raise ValueError("Недостаточно данных для предсказания")
-            
-            logger.info(f"Доступно признаков для предсказания: {len(feature_columns)}")
             
             X = df_features[feature_columns].copy()
             
-            # Конвертируем в числовой формат
+            # Конвертация в числовой формат
             from data_adapter import DataAdapter
-            
             for col in X.columns:
                 if not pd.api.types.is_numeric_dtype(X[col]):
                     X[col] = DataAdapter._robust_numeric_conversion_accumulated(X[col], col)
             
-            # Получаем числовые колонки
             numeric_columns = X.select_dtypes(include=[np.number]).columns.tolist()
             X_numeric = X[numeric_columns]
             
-            # Находим последнюю валидную строку
-            ohlc_columns = ['open', 'high', 'low', 'close']
-            available_ohlc = [col for col in ohlc_columns if col in X_numeric.columns]
-            
-            if available_ohlc:
-                valid_mask = ~X_numeric[available_ohlc].isna().any(axis=1)
-                logger.debug(f"Используем OHLC для валидации: {available_ohlc}")
-            else:
-                # Используем первые 5 числовых колонок
-                important_cols = numeric_columns[:min(5, len(numeric_columns))]
-                valid_mask = ~X_numeric[important_cols].isna().any(axis=1)
-                logger.debug(f"Используем важные колонки: {important_cols}")
-            
+            # Берем последнюю валидную строку
+            valid_mask = ~X_numeric.isna().any(axis=1)
             valid_rows = X_numeric[valid_mask]
             
             if len(valid_rows) == 0:
                 raise ValueError("Нет валидных строк для предсказания")
             
-            # Берем последнюю валидную строку
             X_last = valid_rows.iloc[[-1]]
-            logger.info(f"Используем последнюю валидную строку: индекс {X_last.index[0]}")
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Выравниваем признаки под обученную модель
+            # Выравниваем признаки под обученную модель
             X_aligned = pd.DataFrame(index=X_last.index, columns=self.feature_names)
             
-            missing_features = []
             for feature in self.feature_names:
                 if feature in X_last.columns:
                     X_aligned[feature] = X_last[feature]
                 else:
-                    # Заполняем отсутствующие признаки нулем
                     X_aligned[feature] = 0.0
-                    missing_features.append(feature)
             
-            if missing_features:
-                logger.warning(f"Отсутствуют {len(missing_features)} признаков, заполнены нулями")
-                logger.debug(f"Отсутствующие признаки: {missing_features[:5]}...")
-            
-            # Финальная обработка
-            X_aligned = X_aligned.astype(float)
             X_aligned = X_aligned.fillna(0.0)
             
-            # Проверка на корректность данных
-            if X_aligned.isna().any().any():
-                raise ValueError("Остались NaN после подготовки к предсказанию")
+            # Предсказания для всех моделей
+            predictions = {}
             
-            if np.isinf(X_aligned.values).any():
-                logger.warning("Найдены бесконечные значения, заменяем на 0")
-                X_aligned = X_aligned.replace([np.inf, -np.inf], 0.0)
+            for model_name, model in self.models.items():
+                try:
+                    scaler = self.scalers[model_name]
+                    X_scaled = scaler.transform(X_aligned)
+                    
+                    pred = model.predict(X_scaled)[0]
+                    
+                    if model_name == 'next':
+                        pred = float(np.clip(pred, 0, 100))
+                    elif model_name == 'direction':
+                        direction_names = ['DOWN', 'SIDEWAYS', 'UP']
+                        pred = direction_names[int(pred)]
+                    
+                    predictions[model_name] = pred
+                    
+                except Exception as e:
+                    logger.warning(f"Ошибка предсказания {model_name}: {e}")
+                    predictions[model_name] = None
             
-            # Масштабирование
-            X_scaled = self.scaler.transform(X_aligned)
-            
-            # Предсказание
-            prediction = self.model.predict(X_scaled)[0]
-            prediction = float(np.clip(prediction, 0, 100))  # RSI должен быть 0-100
-            
-            logger.info(f"Предсказанный RSI: {prediction:.2f}")
+            logger.info(f"Предсказания: {predictions}")
             
             if not return_confidence:
-                return prediction
+                return predictions.get('next', current_rsi)
             
             # Создаем детальный результат
-            current_rsi = float(df_features['rsi'].iloc[-1]) if 'rsi' in df_features.columns else 50.0
-            change = prediction - current_rsi
+            predicted_rsi = predictions.get('next', current_rsi)
+            change = predictions.get('change', 0.0)
+            if change is None and predicted_rsi != current_rsi:
+                change = predicted_rsi - current_rsi
             
-            # Простая оценка уверенности на основе изменения
-            confidence = min(95.0, max(50.0, 100 - abs(change) * 3))
+            confidence = 75.0  # Базовая уверенность
             
             result = PredictionResult(
-                predicted_rsi=prediction,
+                predicted_rsi=predicted_rsi,
                 current_rsi=current_rsi,
                 confidence=confidence,
-                change=change,
+                change=change or 0.0,
                 prediction_date=pd.Timestamp.now()
             )
-            
-            logger.info(f"Результат предсказания: {result}")
             
             return result
             
@@ -538,26 +464,20 @@ class RSIPredictor:
             raise
     
     def _create_features_for_prediction(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Создание признаков для предсказания БЕЗ целевой переменной"""
+        """Создание признаков для предсказания БЕЗ целевых переменных"""
         try:
-            logger.info("Создание признаков для предсказания...")
-            
             # Валидация данных
             df = FeatureEngineer.validate_data(df)
             
-            # Создание всех признаков КРОМЕ целевой переменной
+            # Создание всех признаков КРОМЕ целевых переменных
             df = FeatureEngineer.create_existing_indicators_features(df)
             df = FeatureEngineer.create_rsi_features(df)
-            df = FeatureEngineer.create_rsi_correlated_features(df)
             df = FeatureEngineer.create_oscillator_features(df)
             df = FeatureEngineer.create_trend_features(df)
             
-            # ВАЖНО: НЕ создаем rsi_next для предсказания!
+            # НЕ создаем целевые переменные!
             
-            # Удаляем бесконечности
             df = df.replace([np.inf, -np.inf], np.nan)
-            
-            logger.info(f"Признаки для предсказания созданы: {df.shape}")
             
             return df
             
@@ -567,18 +487,19 @@ class RSIPredictor:
     
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         """Получение важности признаков"""
-        if not self.is_trained:
-            logger.warning("Модель не обучена")
+        if not self.is_trained or not self.models:
             return pd.DataFrame()
-            
-        if not hasattr(self.model, 'feature_importances_'):
-            logger.warning("Модель не поддерживает важность признаков")
+        
+        # Берем важность из основной модели (next)
+        main_model = self.models.get('next', list(self.models.values())[0])
+        
+        if not hasattr(main_model, 'feature_importances_'):
             return pd.DataFrame()
         
         try:
             importance_df = pd.DataFrame({
                 'feature': self.feature_names,
-                'importance': self.model.feature_importances_
+                'importance': main_model.feature_importances_
             }).sort_values('importance', ascending=False)
             
             return importance_df.head(top_n)
@@ -587,11 +508,11 @@ class RSIPredictor:
             return pd.DataFrame()
     
     def save(self, filepath: str):
-        """Сохранение модели"""
+        """Сохранение всех моделей"""
         try:
             model_data = {
-                'model': self.model,
-                'scaler': self.scaler,
+                'models': self.models,
+                'scalers': self.scalers,
                 'feature_names': self.feature_names,
                 'config': self.config,
                 'is_trained': self.is_trained,
@@ -600,27 +521,27 @@ class RSIPredictor:
             
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             joblib.dump(model_data, filepath)
-            logger.info(f"PKL модель сохранена: {filepath}")
+            logger.info(f"Модели сохранены: {filepath}")
                 
         except Exception as e:
-            logger.error(f"Ошибка при сохранении модели: {e}")
+            logger.error(f"Ошибка при сохранении: {e}")
             raise
     
     def load(self, filepath: str):
-        """Загрузка модели"""
+        """Загрузка всех моделей"""
         try:
             model_data = joblib.load(filepath)
             
-            self.model = model_data['model']
-            self.scaler = model_data['scaler']
+            self.models = model_data['models']
+            self.scalers = model_data['scalers']
             self.feature_names = model_data['feature_names']
             self.config = model_data['config']
             self.is_trained = model_data['is_trained']
             self._feature_stats = model_data.get('feature_stats', {})
             
-            logger.info(f"Модель загружена: {filepath}")
-            logger.info(f"Признаков в модели: {len(self.feature_names)}")
+            logger.info(f"Модели загружены: {filepath}")
+            logger.info(f"Доступные модели: {list(self.models.keys())}")
             
         except Exception as e:
-            logger.error(f"Ошибка при загрузке модели: {e}")
+            logger.error(f"Ошибка при загрузке: {e}")
             raise
