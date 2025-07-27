@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RSI Aggregator Dashboard</title>
+    
+    <!-- amCharts 5 -->
+    <script src="https://cdn.amcharts.com/lib/5/index.js"></script>
+    <script src="https://cdn.amcharts.com/lib/5/percent.js"></script>
+    <script src="https://cdn.amcharts.com/lib/5/xy.js"></script>
+    <script src="https://cdn.amcharts.com/lib/5/themes/Animated.js"></script>
+    <script src="https://cdn.amcharts.com/lib/5/themes/Dark.js"></script>
+    <script src="https://cdn.amcharts.com/lib/5/themes/Responsive.js"></script>
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 RSI Aggregator Dashboard</h1>
+            <p class="timestamp">{{ timestamp }}</p>
+        </header>
+
+        <main>
+            <!-- Main RSI Gauge -->
+            <section class="rsi-gauge-section">
+                <h2>📊 Current Aggregated RSI</h2>
+                <div id="rsiGaugeChart" class="chart-container gauge-chart"></div>
+                <div class="rsi-info">
+                    <div class="rsi-value">{{ basic_rsi }}</div>
+                    <div class="rsi-sentiment sentiment-{{ sentiment_class }}">{{ sentiment }}</div>
+                    <div class="rsi-confidence">Confidence: {{ confidence }}%</div>
+                </div>
+            </section>
+
+            <!-- Strategy Consensus -->
+            <section class="consensus-section">
+                <h2>🔄 Strategy Consensus</h2>
+                <div class="consensus-stats">
+                    <div class="consensus-rsi">
+                        <span class="label">Consensus RSI:</span>
+                        <span class="value">{{ consensus_rsi }}</span>
+                    </div>
+                    <div class="consensus-agreement">
+                        <span class="label">Agreement:</span>
+                        <span class="value agreement-{{ agreement_class }}">{{ agreement }}</span>
+                    </div>
+                </div>
+                <div id="strategyChart" class="chart-container strategy-chart"></div>
+            </section>
+
+            <!-- Top Contributors -->
+            <section class="contributors-section">
+                <h2>🏆 Top Contributors</h2>
+                <div id="contributorsChart" class="chart-container contributors-chart"></div>
+            </section>
+
+            <!-- Market Overview -->
+            <section class="market-overview-section">
+                <h2>🌍 Market Overview</h2>
+                <div id="marketOverviewChart" class="chart-container market-overview-chart"></div>
+            </section>
+        </main>
+
+        <footer>
+            <div class="stats">
+                <div>Assets: {{ num_assets }}</div>
+                <div>Market Cap: ${{ market_cap }}</div>
+                <div>Processing Time: {{ processing_time }}s</div>
+            </div>
+            <div class="refresh">
+                <button onclick="refreshData()">🔄 Refresh</button>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        // Data from Flask - with error handling
+        let rsiData, strategyData, contributorsData;
+        
+        try {
+            rsiData = {{ rsi_data | safe }};
+        } catch (e) {
+            console.error('Error parsing rsi_data:', e);
+            rsiData = {};
+        }
+        
+        try {
+            strategyData = {{ strategy_data | safe }};
+        } catch (e) {
+            console.error('Error parsing strategy_data:', e);
+            strategyData = [];
+        }
+        
+        try {
+            contributorsData = {{ contributors_data | safe }};
+        } catch (e) {
+            console.error('Error parsing contributors_data:', e);
+            contributorsData = [];
+        }
+        
+        // Debug data
+        console.log('=== DASHBOARD DATA DEBUG ===');
+        console.log('RSI Data:', rsiData);
+        console.log('Strategy Data:', strategyData);
+        console.log('Contributors Data:', contributorsData);
+        console.log('Data types:', typeof rsiData, typeof strategyData, typeof contributorsData);
+        console.log('Is Contributors Array?', Array.isArray(contributorsData));
+        console.log('Contributors Length:', contributorsData ? contributorsData.length : 'undefined');
+        console.log('============================');
+        
+        // Check what's available
+        function checkAmChartsAvailability() {
+            console.log('am5:', typeof am5);
+            console.log('am5.percent:', typeof am5?.percent);
+            console.log('am5.xy:', typeof am5?.xy);
+            console.log('am5themes_Animated:', typeof am5themes_Animated);
+            console.log('am5themes_Dark:', typeof am5themes_Dark);
+            
+            if (typeof am5 !== 'undefined') {
+                console.log('am5 object:', am5);
+                console.log('am5 properties:', Object.keys(am5));
+            }
+        }
+        
+        // Start with minimal checks
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM loaded, checking amCharts availability...');
+            
+            // Wait a bit for scripts to load
+            setTimeout(function() {
+                checkAmChartsAvailability();
+                
+                if (typeof am5 !== 'undefined') {
+                    console.log('amCharts base module found, attempting to initialize...');
+                    initializeCharts();
+                } else {
+                    console.error('amCharts not loaded at all, using fallback charts');
+                    // Force fallback versions
+                    createFallbackGauge({{ basic_rsi }});
+                    createFallbackStrategyChart();
+                    createFallbackContributorsChart();
+                    createFallbackMarketOverviewChart();
+                }
+            }, 2000); // Wait 2 seconds for CDN to load
+        });
+        
+        function initializeCharts() {
+            console.log('Initializing charts...');
+            try {
+                createRSIGauge();
+                console.log('RSI Gauge created');
+            } catch (e) {
+                console.error('Error creating RSI Gauge:', e);
+            }
+            
+            try {
+                createStrategyChart();
+                console.log('Strategy Chart created');
+            } catch (e) {
+                console.error('Error creating Strategy Chart:', e);
+            }
+            
+            try {
+                createContributorsChart();
+                console.log('Contributors Chart created');
+            } catch (e) {
+                console.error('Error creating Contributors Chart:', e);
+            }
+            
+            try {
+                createMarketOverviewChart();
+                console.log('Market Overview Chart created');
+            } catch (e) {
+                console.error('Error creating Market Overview Chart:', e);
+            }
+        }
+        
+        function createRSIGauge() {
+            console.log('Creating RSI Gauge...');
+            
+            const currentRSI = {{ basic_rsi }};
+            console.log('Current RSI:', currentRSI);
+            
+            // Fallback: Create simple HTML gauge if amCharts fails
+            if (typeof am5 === 'undefined' || !am5.percent) {
+                console.log('Using fallback HTML gauge');
+                createFallbackGauge(currentRSI);
+                return;
+            }
+            
+            try {
+                // Create root element
+                const root = am5.Root.new("rsiGaugeChart");
+                
+                // Set themes (with error handling)
+                if (typeof am5themes_Animated !== 'undefined' && typeof am5themes_Dark !== 'undefined') {
+                    root.setThemes([
+                        am5themes_Animated.new(root),
+                        am5themes_Dark.new(root)
+                    ]);
+                }
+                
+                // Create chart
+                const chart = root.container.children.push(
+                    am5.percent.PieChart.new(root, {
+                        layout: root.verticalLayout,
+                        innerRadius: am5.percent(50)
+                    })
+                );
+                
+                // Create series
+                const series = chart.series.push(
+                    am5.percent.PieSeries.new(root, {
+                        valueField: "value",
+                        categoryField: "category",
+                        startAngle: 180,
+                        endAngle: 360
+                    })
+                );
+                
+                const gaugeData = [
+                    { category: "Current", value: currentRSI },
+                    { category: "Remaining", value: 100 - currentRSI }
+                ];
+                
+                // Set data
+                series.data.setAll(gaugeData);
+                
+                // Configure slices
+                series.slices.template.setAll({
+                    cornerRadius: 10
+                });
+                
+                // Color slices
+                series.slices.template.adapters.add("fill", function(fill, target) {
+                    const dataItem = target.dataItem;
+                    if (dataItem && dataItem.get("category") === "Current") {
+                        return am5.Color.fromString(getRSIColor(currentRSI));
+                    } else {
+                        return am5.Color.fromString("#333333");
+                    }
+                });
+                
+                // Hide labels
+                series.labels.template.set("visible", false);
+                series.ticks.template.set("visible", false);
+                
+                // Add center label
+                const label = chart.seriesContainer.children.push(
+                    am5.Label.new(root, {
+                        text: currentRSI.toFixed(1),
+                        centerX: am5.percent(50),
+                        centerY: am5.percent(50),
+                        fontSize: "2em",
+                        fontWeight: "bold",
+                        fill: am5.Color.fromString("#ffd700")
+                    })
+                );
+                
+                console.log('RSI Gauge created successfully');
+            } catch (e) {
+                console.error('Failed to create amCharts gauge, using fallback:', e);
+                createFallbackGauge(currentRSI);
+            }
+        }
+        
+        function createFallbackGauge(rsi) {
+            const container = document.getElementById('rsiGaugeChart');
+            const color = getRSIColor(rsi);
+            const percentage = rsi;
+            
+            container.innerHTML = `
+                <div style="position: relative; width: 200px; height: 100px; margin: 0 auto;">
+                    <div style="width: 200px; height: 100px; border: 8px solid #333; border-bottom: none; border-radius: 100px 100px 0 0; position: relative; overflow: hidden;">
+                        <div style="width: ${percentage}%; height: 100%; background: ${color}; position: absolute; left: 0; bottom: 0; border-radius: 100px 100px 0 0;"></div>
+                    </div>
+                    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 2em; font-weight: bold; color: #ffd700;">
+                        ${rsi.toFixed(1)}
+                    </div>
+                </div>
+            `;
+        }
+        
+        function createStrategyChart() {
+            console.log('Creating Strategy Chart...');
+            console.log('Strategy data:', strategyData);
+            
+            // Fallback if amCharts not available
+            if (typeof am5 === 'undefined' || !am5.xy) {
+                console.log('Using fallback bar chart for strategies');
+                createFallbackStrategyChart();
+                return;
+            }
+            
+            try {
+                // Strategy Comparison Chart
+                const root = am5.Root.new("strategyChart");
+                
+                if (typeof am5themes_Animated !== 'undefined' && typeof am5themes_Dark !== 'undefined') {
+                    root.setThemes([am5themes_Animated.new(root), am5themes_Dark.new(root)]);
+                }
+            
+            const chart = root.container.children.push(
+                am5xy.XYChart.new(root, {
+                    panX: false,
+                    panY: false,
+                    wheelX: false,
+                    wheelY: false,
+                    layout: root.verticalLayout
+                })
+            );
+            
+            // Create Y-axis (RSI values)
+            const yAxis = chart.yAxes.push(
+                am5xy.ValueAxis.new(root, {
+                    min: 0,
+                    max: 100,
+                    renderer: am5xy.AxisRendererY.new(root, {})
+                })
+            );
+            
+            // Create X-axis (Strategies)
+            const xAxis = chart.xAxes.push(
+                am5xy.CategoryAxis.new(root, {
+                    categoryField: "strategy",
+                    renderer: am5xy.AxisRendererX.new(root, {
+                        minGridDistance: 30
+                    })
+                })
+            );
+            
+            // Create series
+            const series = chart.series.push(
+                am5xy.ColumnSeries.new(root, {
+                    name: "RSI",
+                    xAxis: xAxis,
+                    yAxis: yAxis,
+                    valueYField: "rsi",
+                    categoryXField: "strategy"
+                })
+            );
+            
+            series.columns.template.setAll({
+                cornerRadiusTL: 5,
+                cornerRadiusTR: 5,
+                strokeOpacity: 0
+            });
+            
+            // Set data
+            series.data.setAll(strategyData);
+            xAxis.data.setAll(strategyData);
+            
+            // Add value labels on columns
+            series.bullets.push(function() {
+                return am5.Bullet.new(root, {
+                    locationY: 0.5,
+                    sprite: am5.Label.new(root, {
+                        text: "{valueY}",
+                        fill: root.interfaceColors.get("alternativeText"),
+                        centerY: am5.percent(50),
+                        centerX: am5.percent(50),
+                        populateText: true
+                    })
+                });
+            } catch (e) {
+                console.error('Failed to create amCharts strategy chart, using fallback:', e);
+                createFallbackStrategyChart();
+            }
+        }
+        
+        function createFallbackStrategyChart() {
+            console.log('Creating fallback strategy chart with data:', strategyData);
+            const container = document.getElementById('strategyChart');
+            
+            if (!strategyData || !Array.isArray(strategyData) || strategyData.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #ff4444; padding: 50px;">No strategy data available</div>';
+                return;
+            }
+            
+            let html = '<div style="padding: 20px;">';
+            
+            strategyData.forEach(function(item) {
+                const color = getRSIColor(item.rsi);
+                const width = (item.rsi / 100) * 100;
+                
+                html += `
+                    <div style="margin: 10px 0;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                            <span style="color: #fff; font-weight: bold;">${item.strategy}</span>
+                            <span style="color: #ffd700; font-weight: bold;">${item.rsi}</span>
+                        </div>
+                        <div style="width: 100%; height: 20px; background: #333; border-radius: 10px; overflow: hidden;">
+                            <div style="width: ${width}%; height: 100%; background: ${color}; border-radius: 10px;"></div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        function createContributorsChart() {
+            console.log('Creating Contributors Chart...');
+            console.log('Contributors data:', contributorsData);
+            
+            // Fallback if amCharts not available
+            if (typeof am5 === 'undefined' || !am5.percent) {
+                console.log('Using fallback list for contributors');
+                createFallbackContributorsChart();
+                return;
+            }
+            
+            try {
+                // Top Contributors Pie Chart
+                const root = am5.Root.new("contributorsChart");
+                
+                if (typeof am5themes_Animated !== 'undefined' && typeof am5themes_Dark !== 'undefined') {
+                    root.setThemes([am5themes_Animated.new(root), am5themes_Dark.new(root)]);
+                }
+            
+            const chart = root.container.children.push(
+                am5percent.PieChart.new(root, {
+                    layout: root.verticalLayout,
+                    innerRadius: am5.percent(40)
+                })
+            );
+            
+            const series = chart.series.push(
+                am5percent.PieSeries.new(root, {
+                    valueField: "weight",
+                    categoryField: "symbol",
+                    alignLabels: true
+                })
+            );
+            
+            series.labels.template.setAll({
+                textType: "circular",
+                centerX: 0,
+                centerY: 0
+            });
+            
+            // Color slices based on RSI
+            series.slices.template.adapters.add("fill", function(fill, target) {
+                const dataItem = target.dataItem;
+                if (dataItem) {
+                    const data = dataItem.dataContext;
+                    return am5.Color.fromString(getRSIColor(data.rsi));
+                }
+                return fill;
+            });
+            
+            series.data.setAll(contributorsData);
+            
+            // Add legend
+            const legend = chart.children.push(
+                am5.Legend.new(root, {
+                    centerX: am5.percent(50),
+                    x: am5.percent(50),
+                    marginTop: 15,
+                    marginBottom: 15
+                })
+            );
+            legend.data.setAll(series.dataItems);
+            } catch (e) {
+                console.error('Failed to create amCharts contributors chart, using fallback:', e);
+                createFallbackContributorsChart();
+            }
+        }
+        
+        function createFallbackContributorsChart() {
+            console.log('Creating fallback contributors chart with data:', contributorsData);
+            const container = document.getElementById('contributorsChart');
+            
+            if (!contributorsData || !Array.isArray(contributorsData) || contributorsData.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #ff4444; padding: 50px;">No contributors data available</div>';
+                return;
+            }
+            
+            let html = '<div style="padding: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">';
+            
+            contributorsData.forEach(function(item) {
+                const color = getRSIColor(item.rsi);
+                
+                html += `
+                    <div style="background: rgba(255,255,255,0.1); border-radius: 10px; padding: 15px; border-left: 4px solid ${color};">
+                        <div style="font-size: 1.2em; font-weight: bold; color: #ffd700; margin-bottom: 5px;">${item.symbol}</div>
+                        <div style="color: #fff; margin-bottom: 3px;">RSI: <span style="color: ${color}; font-weight: bold;">${item.rsi}</span></div>
+                        <div style="color: #fff; margin-bottom: 3px;">Weight: <span style="color: #ffd700; font-weight: bold;">${item.weight}%</span></div>
+                        <div style="color: #ccc; font-size: 0.9em;">Cap: $${(item.market_cap / 1e9).toFixed(1)}B</div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        function createMarketOverviewChart() {
+            console.log('Creating Market Overview Candlestick Chart...');
+            console.log('Market data:', contributorsData);
+            
+            // Fallback if amCharts not available
+            if (typeof am5 === 'undefined' || !am5.xy) {
+                console.log('Using fallback for market overview');
+                createFallbackMarketOverviewChart();
+                return;
+            }
+            
+            try {
+                // Market Overview Candlestick Chart
+                const root = am5.Root.new("marketOverviewChart");
+                
+                if (typeof am5themes_Animated !== 'undefined' && typeof am5themes_Dark !== 'undefined') {
+                    root.setThemes([am5themes_Animated.new(root), am5themes_Dark.new(root)]);
+                }
+            
+                const chart = root.container.children.push(
+                    am5.xy.XYChart.new(root, {
+                        panX: true,
+                        panY: true,
+                        wheelX: "panX",
+                        wheelY: "zoomY",
+                        paddingLeft: 20,
+                        paddingRight: 20
+                    })
+                );
+                
+                // Create Y-axis (Price)
+                const yAxis = chart.yAxes.push(
+                    am5.xy.ValueAxis.new(root, {
+                        renderer: am5.xy.AxisRendererY.new(root, {}),
+                        tooltip: am5.Tooltip.new(root, {
+                            labelText: "Price: ${value}"
+                        })
+                    })
+                );
+                
+                yAxis.get("renderer").set("inside", true);
+                
+                // Create X-axis (Categories for each crypto)
+                const xAxis = chart.xAxes.push(
+                    am5.xy.CategoryAxis.new(root, {
+                        categoryField: "symbol",
+                        renderer: am5.xy.AxisRendererX.new(root, {
+                            minGridDistance: 60
+                        }),
+                        tooltip: am5.Tooltip.new(root, {
+                            labelText: "{category}"
+                        })
+                    })
+                );
+                
+                xAxis.get("renderer").get("grid").set("visible", false);
+                
+                // Create candlestick series
+                const series = chart.series.push(
+                    am5.xy.CandlestickSeries.new(root, {
+                        name: "Crypto Prices",
+                        xAxis: xAxis,
+                        yAxis: yAxis,
+                        valueYField: "close",
+                        openValueYField: "open",
+                        lowValueYField: "low",
+                        highValueYField: "high",
+                        categoryXField: "symbol"
+                    })
+                );
+                
+                // Configure candlestick appearance
+                series.columns.template.setAll({
+                    width: am5.percent(80),
+                    strokeWidth: 2
+                });
+                
+                // Color candlesticks based on price change
+                series.columns.template.adapters.add("fill", function(fill, target) {
+                    const dataItem = target.dataItem;
+                    if (dataItem) {
+                        const priceChange = dataItem.get("price_change_24h") || 0;
+                        if (priceChange >= 0) {
+                            return am5.Color.fromString("#00ff00"); // Green for positive
+                        } else {
+                            return am5.Color.fromString("#ff4444"); // Red for negative
+                        }
+                    }
+                    return fill;
+                });
+                
+                series.columns.template.adapters.add("stroke", function(stroke, target) {
+                    const dataItem = target.dataItem;
+                    if (dataItem) {
+                        const priceChange = dataItem.get("price_change_24h") || 0;
+                        if (priceChange >= 0) {
+                            return am5.Color.fromString("#00aa00"); // Dark green for positive
+                        } else {
+                            return am5.Color.fromString("#cc0000"); // Dark red for negative
+                        }
+                    }
+                    return stroke;
+                });
+                
+                // Add tooltips
+                series.columns.template.set("tooltipText", 
+                    "{symbol}\nOpen: ${open}\nHigh: ${high}\nLow: ${low}\nClose: ${close}\nChange: {price_change_24h}%\nRSI: {rsi}\nWeight: {weight}%\nCap: ${market_cap.formatNumber('#.0a')}"
+                );
+                
+                // Add volume bars at the bottom (using weight as volume indicator)
+                const volumeAxis = chart.yAxes.push(
+                    am5.xy.ValueAxis.new(root, {
+                        height: am5.percent(20),
+                        renderer: am5.xy.AxisRendererY.new(root, {
+                            opposite: true
+                        })
+                    })
+                );
+                
+                const volumeSeries = chart.series.push(
+                    am5.xy.ColumnSeries.new(root, {
+                        name: "Weight",
+                        xAxis: xAxis,
+                        yAxis: volumeAxis,
+                        valueYField: "weight",
+                        categoryXField: "symbol"
+                    })
+                );
+                
+                volumeSeries.columns.template.setAll({
+                    width: am5.percent(60),
+                    fill: am5.Color.fromString("#888888"),
+                    fillOpacity: 0.5
+                });
+                
+                volumeSeries.columns.template.set("tooltipText", "{symbol}: Weight {weight}%");
+                
+                // RSI indicator overlay
+                const rsiSeries = chart.series.push(
+                    am5.xy.LineSeries.new(root, {
+                        name: "RSI",
+                        xAxis: xAxis,
+                        yAxis: yAxis,
+                        valueYField: "rsiScaled", // We'll scale RSI to price range
+                        categoryXField: "symbol"
+                    })
+                );
+                
+                // Scale RSI to fit price range and add to data
+                const priceRange = Math.max(...contributorsData.map(d => d.high)) - Math.min(...contributorsData.map(d => d.low));
+                const minPrice = Math.min(...contributorsData.map(d => d.low));
+                
+                const dataWithRSI = contributorsData.map(item => ({
+                    ...item,
+                    rsiScaled: minPrice + (item.rsi / 100) * priceRange
+                }));
+                
+                rsiSeries.strokes.template.setAll({
+                    strokeWidth: 3,
+                    stroke: am5.Color.fromString("#ffd700")
+                });
+                
+                rsiSeries.bullets.push(function() {
+                    return am5.Bullet.new(root, {
+                        sprite: am5.Circle.new(root, {
+                            radius: 4,
+                            fill: am5.Color.fromString("#ffd700"),
+                            stroke: am5.Color.fromString("#ffffff"),
+                            strokeWidth: 1
+                        })
+                    });
+                });
+                
+                // Set data
+                series.data.setAll(dataWithRSI);
+                volumeSeries.data.setAll(dataWithRSI);
+                rsiSeries.data.setAll(dataWithRSI);
+                xAxis.data.setAll(dataWithRSI);
+                
+                console.log('Market Overview Candlestick Chart created successfully');
+            } catch (e) {
+                console.error('Failed to create amCharts candlestick chart, using fallback:', e);
+                createFallbackMarketOverviewChart();
+            }
+        }
+        
+        function createFallbackMarketOverviewChart() {
+            console.log('Creating fallback market overview chart with data:', contributorsData);
+            const container = document.getElementById('marketOverviewChart');
+            
+            if (!contributorsData || !Array.isArray(contributorsData) || contributorsData.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #ff4444; padding: 50px;">No market data available</div>';
+                return;
+            }
+            
+            // Sort by market cap for better visualization
+            const sortedData = [...contributorsData].sort((a, b) => b.market_cap - a.market_cap);
+            
+            let html = '<div style="padding: 20px;">';
+            
+            // Header
+            html += '<div style="text-align: center; margin-bottom: 20px;">';
+            html += '<h3 style="color: #ffd700; margin-bottom: 10px;">📊 Market Candlestick Overview</h3>';
+            html += '<div style="color: #ccc; font-size: 0.9em;">Green = Price Up | Red = Price Down | Bar Height = RSI Level</div>';
+            html += '</div>';
+            
+            // Candlestick chart container
+            html += '<div style="display: flex; align-items: end; justify-content: space-around; height: 300px; margin-bottom: 20px; background: rgba(0,0,0,0.3); border-radius: 10px; padding: 20px; overflow-x: auto;">';
+            
+            // Find max price for scaling
+            const maxPrice = Math.max(...sortedData.map(item => Math.max(item.high || item.price, item.price)));
+            const minPrice = Math.min(...sortedData.map(item => Math.min(item.low || item.price * 0.98, item.price * 0.98)));
+            const priceRange = maxPrice - minPrice;
+            
+            sortedData.forEach(function(item) {
+                const open = item.open || item.price * 0.99;
+                const high = item.high || item.price * 1.01;
+                const low = item.low || item.price * 0.99;
+                const close = item.price;
+                const priceChange = item.price_change_24h || 0;
+                
+                // Calculate heights (scaled to 200px max)
+                const candleHeight = Math.max(5, Math.abs(close - open) / priceRange * 200);
+                const wickTop = (high - Math.max(open, close)) / priceRange * 200;
+                const wickBottom = (Math.min(open, close) - low) / priceRange * 200;
+                const totalHeight = candleHeight + wickTop + wickBottom;
+                
+                // Colors
+                const candleColor = priceChange >= 0 ? "#00ff00" : "#ff4444";
+                const candleBorder = priceChange >= 0 ? "#00aa00" : "#cc0000";
+                const rsiColor = getRSIColor(item.rsi);
+                
+                html += `
+                    <div style="display: flex; flex-direction: column; align-items: center; margin: 0 2px; min-width: 40px;">
+                        <!-- Symbol label -->
+                        <div style="writing-mode: vertical-lr; text-orientation: mixed; color: #fff; font-size: 0.7em; margin-bottom: 5px; font-weight: bold;">${item.symbol}</div>
+                        
+                        <!-- Candlestick -->
+                        <div style="display: flex; flex-direction: column; align-items: center; height: ${totalHeight + 20}px; justify-content: flex-end;">
+                            <!-- Upper wick -->
+                            <div style="width: 2px; height: ${wickTop}px; background: ${candleColor}; margin-bottom: 0;"></div>
+                            
+                            <!-- Candle body -->
+                            <div style="width: 12px; height: ${candleHeight}px; background: ${candleColor}; border: 1px solid ${candleBorder}; position: relative;" 
+                                 title="${item.symbol}: O:$${open.toFixed(4)} H:$${high.toFixed(4)} L:$${low.toFixed(4)} C:$${close.toFixed(4)} (${priceChange > 0 ? '+' : ''}${priceChange}%)">
+                                <!-- RSI indicator dot -->
+                                <div style="position: absolute; top: ${(1 - item.rsi/100) * candleHeight - 2}px; left: -3px; width: 6px; height: 4px; background: ${rsiColor}; border-radius: 50%; border: 1px solid #fff;"></div>
+                            </div>
+                            
+                            <!-- Lower wick -->
+                            <div style="width: 2px; height: ${wickBottom}px; background: ${candleColor}; margin-top: 0;"></div>
+                        </div>
+                        
+                        <!-- Price and change -->
+                        <div style="text-align: center; margin-top: 5px;">
+                            <div style="color: ${candleColor}; font-size: 0.7em; font-weight: bold;">$${close.toFixed(4)}</div>
+                            <div style="color: ${candleColor}; font-size: 0.6em;">${priceChange > 0 ? '+' : ''}${priceChange}%</div>
+                        </div>
+                        
+                        <!-- Weight bar -->
+                        <div style="width: 20px; height: ${Math.max(2, item.weight * 2)}px; background: #888; margin-top: 3px; border-radius: 1px;" title="Weight: ${item.weight}%"></div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            
+            // Legend
+            html += `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 20px; font-size: 0.8em;">
+                    <div style="background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        <div style="color: #ffd700; font-weight: bold; margin-bottom: 5px;">🕯️ Candlesticks:</div>
+                        <div style="color: #00ff00;">■ Green = Price Up (24h)</div>
+                        <div style="color: #ff4444;">■ Red = Price Down (24h)</div>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        <div style="color: #ffd700; font-weight: bold; margin-bottom: 5px;">📊 RSI Levels:</div>
+                        <div style="color: #ff4444;">● Red ≥70 (Overbought)</div>
+                        <div style="color: #00ff00;">● Green ≤30 (Oversold)</div>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;">
+                        <div style="color: #ffd700; font-weight: bold; margin-bottom: 5px;">⚖️ Weight:</div>
+                        <div style="color: #888;">Gray bars = Index weight</div>
+                        <div style="color: #ccc;">Taller = More important</div>
+                    </div>
+                </div>
+            `;
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        function getRSIColor(rsi) {
+            if (rsi >= 70) return "#ff4444"; // Overbought - Red
+            if (rsi >= 55) return "#ffa500"; // Bullish - Orange
+            if (rsi >= 45) return "#ffff00"; // Neutral - Yellow
+            if (rsi >= 30) return "#90ee90"; // Bearish - Light Green
+            return "#00ff00"; // Oversold - Green
+        }
+        
+        function refreshData() {
+            window.location.reload();
+        }
+        
+        // Auto-refresh every 5 minutes
+        setInterval(refreshData, 300000);
+    </script>
+</body>
+</html>

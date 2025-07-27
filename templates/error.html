@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - RSI Aggregator Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <style>
+        .error-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 60vh;
+            text-align: center;
+        }
+        
+        .error-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+        
+        .error-message {
+            font-size: 1.2rem;
+            color: #ff4444;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 68, 68, 0.1);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 68, 68, 0.3);
+        }
+        
+        .error-actions {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .error-actions a {
+            background: linear-gradient(45deg, #ffd700, #ffaa00);
+            color: #333;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-weight: bold;
+            transition: transform 0.2s ease;
+        }
+        
+        .error-actions a:hover {
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 RSI Aggregator Dashboard</h1>
+        </header>
+        
+        <div class="error-container">
+            <div class="error-icon">⚠️</div>
+            <h2>Oops! Something went wrong</h2>
+            <div class="error-message">
+                {{ error }}
+            </div>
+            <div class="error-actions">
+                <a href="/">🏠 Home</a>
+                <a href="/api/rsi">📊 API Data</a>
+                <a href="javascript:window.location.reload()">🔄 Retry</a>
+            </div>
+        </div>
+        
+        <footer>
+            <div class="stats">
+                <div>RSI Aggregator Dashboard</div>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RSI Chart - TradingView Style</title>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0D1421;
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: #131722;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .header {
+            background: #1E222D;
+            padding: 15px 20px;
+            border-bottom: 1px solid #2A2E39;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #D1D4DC;
+        }
+
+        .rsi-values {
+            display: flex;
+            gap: 15px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .rsi-value {
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 600px;
+            background: #131722;
+            padding: 20px;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #787B86;
+            font-size: 16px;
+            z-index: 100;
+        }
+
+        .error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #F23645;
+            font-size: 16px;
+            z-index: 100;
+            display: none;
+        }
+
+        .refresh-btn {
+            background: #2962FF;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: #1E53E5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="title">Aggregated RSI - Top 20 Altcoins</div>
+            <div class="rsi-values">
+                <div class="rsi-value" id="currentRsi" style="color: #4CAF50;">Loading...</div>
+                <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <div id="loading" class="loading">Loading RSI data...</div>
+            <div id="error" class="error">Error loading data</div>
+            <canvas id="rsiChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        let chart;
+
+        function initChart() {
+            const ctx = document.getElementById('rsiChart').getContext('2d');
+            
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Aggregated RSI',
+                            data: [],
+                            borderColor: '#4CAF50',
+                            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.2,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            pointHoverBackgroundColor: '#4CAF50',
+                            pointHoverBorderColor: '#ffffff',
+                            pointHoverBorderWidth: 2
+                        },
+                        // Overbought line
+                        {
+                            label: 'Overbought (70)',
+                            data: [],
+                            borderColor: '#F23645',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1,
+                            borderDash: [5, 5],
+                            fill: false,
+                            pointRadius: 0,
+                            pointHoverRadius: 0
+                        },
+                        // Oversold line
+                        {
+                            label: 'Oversold (30)',
+                            data: [],
+                            borderColor: '#F23645',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1,
+                            borderDash: [5, 5],
+                            fill: false,
+                            pointRadius: 0,
+                            pointHoverRadius: 0
+                        },
+                        // Middle line
+                        {
+                            label: 'Middle (50)',
+                            data: [],
+                            borderColor: '#787B86',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1,
+                            borderDash: [3, 3],
+                            fill: false,
+                            pointRadius: 0,
+                            pointHoverRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            backgroundColor: '#1E222D',
+                            titleColor: '#D1D4DC',
+                            bodyColor: '#D1D4DC',
+                            borderColor: '#2A2E39',
+                            borderWidth: 1,
+                            callbacks: {
+                                title: function(context) {
+                                    return new Date(context[0].parsed.x).toLocaleDateString();
+                                },
+                                label: function(context) {
+                                    if (context.datasetIndex === 0) {
+                                        return `RSI: ${context.parsed.y.toFixed(2)}%`;
+                                    }
+                                    return null;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                displayFormats: {
+                                    day: 'MMM dd'
+                                }
+                            },
+                            grid: {
+                                color: '#2A2E39',
+                                drawBorder: false
+                            },
+                            ticks: {
+                                color: '#787B86',
+                                maxTicksLimit: 10
+                            }
+                        },
+                        y: {
+                            min: 0,
+                            max: 100,
+                            grid: {
+                                color: '#2A2E39',
+                                drawBorder: false
+                            },
+                            ticks: {
+                                color: '#787B86',
+                                callback: function(value) {
+                                    return value + '%';
+                                },
+                                stepSize: 10
+                            }
+                        }
+                    },
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    }
+                }
+            });
+
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        async function loadRSIData() {
+            try {
+                const response = await fetch('/api/rsi/historical');
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                console.log('Loaded RSI data:', data);
+
+                // Convert data for Chart.js
+                const chartData = data.historical_data.map(point => ({
+                    x: point.date,
+                    y: point.rsi
+                }));
+
+                // Create reference lines data
+                const referenceData = data.historical_data.map(point => ({
+                    x: point.date,
+                    y: null  // Will be set per line
+                }));
+
+                // Update chart with RSI data
+                chart.data.datasets[0].data = chartData;
+                
+                // Update reference lines
+                chart.data.datasets[1].data = referenceData.map(p => ({x: p.x, y: 70})); // Overbought
+                chart.data.datasets[2].data = referenceData.map(p => ({x: p.x, y: 30})); // Oversold  
+                chart.data.datasets[3].data = referenceData.map(p => ({x: p.x, y: 50})); // Middle
+
+                chart.update();
+
+                // Update current value display
+                document.getElementById('currentRsi').textContent = `${data.current_rsi.toFixed(2)}%`;
+                
+                console.log('Chart updated successfully');
+                
+            } catch (error) {
+                console.error('Error loading RSI data:', error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+
+        function refreshData() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('error').style.display = 'none';
+            loadRSIData();
+        }
+
+        // Initialize
+        window.addEventListener('load', () => {
+            initChart();
+            loadRSIData();
+        });
+    </script>
+</body>
+</html>
